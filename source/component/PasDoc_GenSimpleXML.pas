@@ -1,5 +1,5 @@
 {
-  Copyright 1998-2016 PasDoc developers.
+  Copyright 1998-2018 PasDoc developers.
 
   This file is part of "PasDoc".
 
@@ -52,6 +52,8 @@ type
     function FormatAnchor(const Anchor: string): string; override;
     function FormatTable(Table: TTableData): string; override;
     function FormatList(ListData: TListData): string; override;
+    function FormatBold(const Text: string): string; override;
+    function FormatItalic(const Text: string): string; override;
   private
     space:string;
 
@@ -87,6 +89,7 @@ begin
   inherited;
   WriteUnits(1);
   WriteIntroduction;
+  WriteAdditionalFiles;
   WriteConclusion;
   EndSpellChecking;
 end;
@@ -363,6 +366,16 @@ begin
 
   Result := Result + Format('</%s>', [ListTag[ListData.ListType]]) +
     LineEnding + LineEnding;
+end;
+
+function TSimpleXMLDocGenerator.FormatBold(const Text: string): string;
+begin
+  Result := '<bold>' + Text + '</bold>';
+end;
+
+function TSimpleXMLDocGenerator.FormatItalic(const Text: string): string;
+begin
+  Result := '<italic>' + Text + '</italic>';
 end;
 
 end.

@@ -1,5 +1,5 @@
 {
-  Copyright 1998-2016 PasDoc developers.
+  Copyright 1998-2018 PasDoc developers.
 
   This file is part of "PasDoc".
 
@@ -32,21 +32,21 @@
   @author(Marc Weustinks (Dutch translation))
   @author(Martin Hansen <mh AT geus.dk> (Danish translation))
   @author(Michele Bersini <michele.bersini AT smartit.it> (Italian translation))
-  @author(Peter Šimkoviè <simkovic_jr AT manal.sk> (Slovak translation))
-  @author(Peter Thörnqvist <pt AT timemetrics.se> (Swedish translation))
+  @author(Peter Simkovic <simkovic_jr AT manal.sk> (Slovak translation))
+  @author(Peter Th_rnqvist <pt AT timemetrics.se> (Swedish translation))
   @author(Rodrigo Urubatan Ferreira Jardim <rodrigo AT netscape.net> (Brasilian translation))
   @author(Alexandre da Silva <simpsomboy AT gmail.com> (Brasilian translation - Update))
   @author(Alexsander da Rosa <alex AT rednaxel.com> (Brasilian translation - UTF8))
   @author(Vitaly Kovalenko <v_l_kovalenko AT alsy.by> (Russian translation))
   @author(Grzegorz Skoczylas <gskoczylas AT rekord.pl> (corrected Polish translation))
-  @author(Jónás Gergõ <jonas.gergo AT ch...> (Hungarian translation))
+  @author(Jonas Gergo <jonas.gergo AT ch...> (Hungarian translation))
   @author(Michalis Kamburelis)
   @author(Ascanio Pressato (Some Italian translation))
   @author(JBarbero Quiter (updated Spanish translation))
   @author(Liu Chuanjun <1000copy AT gmail.com> (Chinese gb2312 translation))
   @author(Liu Da <xmacmail AT gmail.com> (Chinese gb2312 translation))
   @author(DoDi)
-  @author(René Mihula <rene.mihula@gmail.com> (Czech translation))
+  @author(Rene Mihula <rene.mihula@gmail.com> (Czech translation))
   @author(Yann Merignac (French translation))
   @author(Arno Garrels <first name.name@nospamgmx.de>)
 }
@@ -97,7 +97,8 @@ type
     lgEnglish,
     lgFrench_ISO_8859_15,
     lgFrench_UTF_8,
-    lgGerman,
+    lgGerman_ISO_8859_15,
+    lgGerman_UTF_8,
     lgIndonesian,
     lgItalian,
     lgJavanese,
@@ -127,8 +128,8 @@ type
     trUnits,
     trClassHierarchy,
     trCio,
-    trInternalCR,
-    trInternalTypes,
+    trNestedCR,
+    trNestedTypes,
     trIdentifiers,
     trGvUses,
     trGvClasses,
@@ -181,11 +182,13 @@ type
     trDeprecated,
     trPlatformSpecific,
     trLibrarySpecific,
+    trExperimental,
 
   //headings
     trOverview,
     trIntroduction,
     trConclusion,
+    trAdditionalFile,
     trEnclosingClass,
     trHeadlineCio,
     trHeadlineConstants,
@@ -226,7 +229,7 @@ type
 
     trSearch,
     trSeeAlso,
-    trInternal,
+    trNested,
   //add more here
     trAttributes,
     trDummy
@@ -385,7 +388,8 @@ const
   aDutch              : {$I lang\PasDoc_Languages_Dutch_1252.inc}
   aFrench_ISO_8859_15 : {$I lang\PasDoc_Languages_French_ISO_8859_15.inc}
   aFrench_UTF_8       : {$I lang\PasDoc_Languages_French_utf8.inc}
-  aGerman             : {$I lang\PasDoc_Languages_German_1252.inc}
+  aGerman_ISO_8859_15 : {$I lang\PasDoc_Languages_German_ISO_8859_15.inc}
+  aGerman_UTF_8       : {$I lang\PasDoc_Languages_German_utf8.inc}
   aIndonesian         : {$I lang\PasDoc_Languages_Indonesian_1252.inc}
   aItalian            : {$I lang\PasDoc_Languages_Italian_1252.inc}
   aJavanese           : {$I lang\PasDoc_Languages_Javanese_1250.inc}
@@ -441,7 +445,8 @@ const
     (Table: @aEnglish; Name: 'English'; Syntax: 'en'; CharSet: 'utf-8'; AspellLanguage: ''),
     (Table: @aFrench_ISO_8859_15; Name: 'French (iso-8859-15)'; Syntax: 'fr'; CharSet: 'iso-8859-15'; AspellLanguage: ''),
     (Table: @aFrench_UTF_8; Name: 'French (UTF-8)'; Syntax: 'fr.utf8'; CharSet: 'utf-8'; AspellLanguage: ''),
-    (Table: @aGerman; Name: 'German'; Syntax: 'de'; CharSet: 'iso-8859-15'; AspellLanguage: ''),
+    (Table: @aGerman_ISO_8859_15; Name: 'German (iso-8859-15)'; Syntax: 'de'; CharSet: 'iso-8859-15'; AspellLanguage: ''),
+    (Table: @aGerman_UTF_8; Name: 'German (UTF-8)'; Syntax: 'de.utf8'; CharSet: 'utf-8'; AspellLanguage: ''),
     (Table: @aIndonesian; Name: 'Indonesian'; Syntax: 'id'; CharSet: 'windows-1252'; AspellLanguage: ''),
     (Table: @aItalian; Name: 'Italian'; Syntax: 'it'; CharSet: 'iso-8859-15'; AspellLanguage: ''),
     (Table: @aJavanese; Name: 'Javanese'; Syntax: 'jv'; CharSet: 'windows-1252'; AspellLanguage: ''),

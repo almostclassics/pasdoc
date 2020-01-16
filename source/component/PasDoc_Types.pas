@@ -1,5 +1,5 @@
 {
-  Copyright 1998-2016 PasDoc developers.
+  Copyright 1998-2018 PasDoc developers.
 
   This file is part of "PasDoc".
 
@@ -31,7 +31,7 @@ unit PasDoc_Types;
 interface
 
 uses
-  SysUtils;
+  SysUtils, StrUtils;
 
 type
 {$IFNDEF COMPILER_11_UP}
@@ -41,6 +41,7 @@ type
   UnicodeString = WideString;
   RawByteString = AnsiString;
 {$ENDIF}
+
   { }
   TPasDocMessageType = (pmtPlainText, pmtInformation, pmtWarning, pmtError);
   { }
@@ -53,7 +54,7 @@ type
   EPasDoc = class(Exception)
   public
     constructor Create(const AMessage: string;
-      const AArguments: array of const; const AExitCode: Word);
+      const AArguments: array of const; const AExitCode: Word = 3);
   end;
 
   { This represents parts of a qualified name of some item.
@@ -79,14 +80,14 @@ const
 {$ENDIF}
 {$ENDIF}
 
-{ Splits S, which can be made of up to three parts, separated by dots.
-  If S is not a valid identifier or if it has more than
-  three parts, false is returned, otherwise true is returned
+{ Splits S, which can be made of any number of parts, separated by dots
+  (Delphi namespaces, like PasDoc.Output.HTML.TWriter.Write).
+  If S is not a valid identifier, @false is returned, otherwise @true is returned
   and splitted name is returned as NameParts. }
 function SplitNameParts(S: string; out NameParts: TNameParts): Boolean;
 
 { Simply returns an array with Length = 1 and one item = S. }
-function OneNamePart(S: string): TNameParts;
+function OneNamePart(const S: string): TNameParts;
 
 { Simply concatenates all NameParts with dot. }
 function GlueNameParts(const NameParts: TNameParts): string;
@@ -97,6 +98,8 @@ type
   TImplicitVisibility = (ivPublic, ivPublished, ivImplicit);
 
 implementation
+
+{$IFDEF FPC} uses Types; {$endif} { For TStringDynArray type }
 
 { EPasDoc -------------------------------------------------------------------- }
 
@@ -109,6 +112,53 @@ end;
 
 { global routines ------------------------------------------------------------ }
 
+{$IFDEF FPC}
+type
+  TStringArray = TStringDynArray;
+{$ENDIF}
+{$IF NOT DECLARED(TStringArray)}
+type
+  TStringArray = array of string;
+{$IFEND}
+
+{$IF NOT DECLARED(SplitString)}
+// Primitive implementation for ancient compilers, uses only 1st char of Delimiters
+function SplitString(const S, Delimiters: string): TStringArray;
+var
+  DelimCount, PrevDelimPos, DelimPos, i: Integer;
+begin
+  // Count delims in name and set length of array
+  DelimCount := 0;
+  i := 0;
+  repeat
+    i := PosEx(Delimiters[1], s, i + 1);
+    if i > 0 then
+      Inc(DelimCount);
+  until i = 0;
+  SetLength(Result, DelimCount + 1);
+
+  // no delims - simple case
+  if DelimCount = 0 then
+  begin
+    Result[0] := s;
+    Exit;
+  end;
+
+  PrevDelimPos := 1;
+  for i := 0 to High(Result) do
+  begin
+    DelimPos := PosEx(Delimiters[1], s, PrevDelimPos);
+    if DelimPos = 0 then // last delim in the string
+    begin
+      Result[i] := Copy(s, PrevDelimPos, MaxInt);
+      Break;
+    end;
+    Result[i] := Copy(s, PrevDelimPos, DelimPos - PrevDelimPos);
+    PrevDelimPos := DelimPos + 1;
+  end;
+end;
+{$IFEND}
+
 function SplitNameParts(S: string;
   out NameParts: TNameParts): Boolean;
 
@@ -119,25 +169,8 @@ const
   { set of characters, including all characters from @link(IdentifierStart)
     plus the ten decimal digits }
   IdentifierOther : TCharSet = ['A'..'Z', 'a'..'z', '_', '0'..'9', '.'];
-
-  procedure SplitInTwo(s: string; var S1, S2: string);
-  var
-    i: Integer;
-  begin
-    i := Pos('.', s);
-    if (i = 0) then begin
-      S1 := s;
-      S2 := '';
-    end
-    else begin
-      S1 := System.Copy(s, 1, i - 1);
-      S2 := System.Copy(s, i + 1, Length(s));
-    end;
-  end;
-
 var
   i: Integer;
-  t: string;
 begin
   Result := False;
 
@@ -163,22 +196,11 @@ begin
     Inc(i);
   end;
 
-  SplitInTwo(S, NameParts[0], NameParts[1]);
-  if NameParts[1] = '' then
-  begin
-    SetLength(NameParts, 1);
-  end else
-  begin
-    t := NameParts[1];
-    SplitInTwo(t, NameParts[1], NameParts[2]);
-    if NameParts[2] = '' then
-      SetLength(NameParts, 2) else
-      SetLength(NameParts, 3);
-  end;
+  NameParts := SplitString(s, '.');
   Result := True;
 end;
 
-function OneNamePart(S: string): TNameParts;
+function OneNamePart(const S: string): TNameParts;
 begin
   SetLength(Result, 1);
   Result[0] := S;

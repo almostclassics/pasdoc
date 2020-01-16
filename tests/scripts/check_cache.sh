@@ -12,13 +12,14 @@ set -eu
 run_echo ()
 {
   echo "$@"
-  scripts/find_all_tests_for_check_cache.sh | "$@"
+  scripts/find_all_tests_for_check_cache.sh | "$@" \
+    > scripts/check_cache_tmp/pasdoc_output.txt
 }
 
 pasdoc_call ()
 {
   echo 'Running pasdoc:'
-  run_echo pasdoc \
+  run_echo "${PASDOC_BIN}" \
     --format="$OUTPUT_FORMAT" -S - \
     --exclude-generator \
     --cache-dir=scripts/check_cache_tmp/cache/ \
@@ -27,6 +28,9 @@ pasdoc_call ()
 
 # ------------------------------------------------------------
 
+# Assume pasdoc is on $PATH, if PASDOC_BIN not set.
+PASDOC_BIN="${PASDOC_BIN:-pasdoc}"
+
 OUTPUT_FORMAT="$1"
 shift 1
 
@@ -34,6 +38,8 @@ rm -Rf check_cache_tmp/
 mkdir -p check_cache_tmp/cache/ check_cache_tmp/1/ check_cache_tmp/2/
 
 cd ..
+
+echo "Checking cache for format ${OUTPUT_FORMAT}"
 
 pasdoc_call --output=scripts/check_cache_tmp/1/
 pasdoc_call --output=scripts/check_cache_tmp/2/

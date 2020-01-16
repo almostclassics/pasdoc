@@ -1,5 +1,5 @@
 {
-  Copyright 1998-2016 PasDoc developers.
+  Copyright 1998-2018 PasDoc developers.
 
   This file is part of "PasDoc".
 
@@ -246,6 +246,7 @@ type
     FLinkLook: TLinkLook;
     FConclusion: TExternalItem;
     FIntroduction: TExternalItem;
+    FAdditionalFiles: TExternalItemList;
 
     FAbbreviations: TStringList;
     FGraphVizClasses: boolean;
@@ -254,6 +255,7 @@ type
     FWriteUsesClause: boolean;
     FAutoLink: boolean;
     FAutoLinkExclude: TStringList;
+    FMarkdown: boolean;
 
     { Name of the project to create. }
     FProjectName: string;
@@ -776,6 +778,10 @@ type
      See @link(WriteExternal).}
     procedure WriteIntroduction;
 
+    {@name writes the other files for the project.
+     See @link(WriteExternal).}
+    procedure WriteAdditionalFiles;
+
     // @name writes a section heading and a link-anchor;
     function FormatSection(HL: integer; const Anchor: string;
       const Caption: string): string; virtual; abstract;
@@ -806,19 +812,18 @@ type
       ConvertString(Text). }
     function FormatPreformatted(const Text: string): string; virtual;
 
-    { This should return markup upon including specified image in description.
-      FileNames is a list of alternative filenames of an image,
-      it always contains at least one item (i.e. FileNames.Count >= 1),
+    { Return markup to show an image.
+      FileNames is a list of possible filenames of the image.
+      FileNames always contains at least one item (i.e. FileNames.Count >= 1),
       never contains empty lines (i.e. Trim(FileNames[I]) <> ''),
-      and contains only absolute filenames (already expanded to take description's
-      unit's path into account).
+      and contains only absolute filenames.
 
       E.g. HTML generator will want to choose the best format for HTML,
       then somehow copy the image from FileNames[Chosen] and wrap
       this in <img src="...">.
 
-      Implementation of this method in this class simply returns
-      @code(Result := ExpandFileName(FileNames[0])). Output generators should override this. }
+      Implementation of this method in this class simply shows
+      @code(FileNames[0]). Output generators should override this. }
     function FormatImage(FileNames: TStringList): string; virtual;
 
     { Format a list from given ListData. }
@@ -880,6 +885,7 @@ type
     property Introduction: TExternalItem read FIntroduction
       write FIntroduction;
     property Conclusion: TExternalItem read FConclusion write FConclusion;
+    property AdditionalFiles: TExternalItemList read FAdditionalFiles write FAdditionalFiles;
 
     { Callback receiving messages from generator.
 
@@ -970,6 +976,9 @@ type
     property ExternalClassHierarchy: TStrings
       read FExternalClassHierarchy write SetExternalClassHierarchy
       stored StoredExternalClassHierarchy;
+
+    property Markdown: boolean
+      read FMarkdown write FMarkdown default false;
   end;
 
 implementation
@@ -1124,6 +1133,15 @@ begin
     Conclusion.OutputFileName := Conclusion.FullLink;
   end;
 
+  if (AdditionalFiles <> nil) and (AdditionalFiles.Count > 0) then
+  begin
+    for i := 0 to AdditionalFiles.Count - 1 do
+    begin
+      AdditionalFiles.Get(i).FullLink := CreateLink(AdditionalFiles.Get(i));
+      AdditionalFiles.Get(i).OutputFileName := AdditionalFiles.Get(i).FullLink;
+    end;
+  end;
+
   for i := 0 to Units.Count - 1 do begin
     U := Units.UnitAt[i];
     U.FullLink := CreateLink(U);
@@ -1201,15 +1219,17 @@ procedure TDocGenerator.HandleLongCodeTag(
   EnclosingTag: TTag; var EnclosingTagData: TObject;
   const TagParameter: string; var ReplaceStr: string);
 begin
-  if TagParameter = '' then
-    exit;
+  // Always set ReplaceStr
+  ReplaceStr := TagParameter;
+
   // Trim off "marker" characters at the beginning and end of TagParameter.
   // Do this only if they are the same character -- this way we are backward
   // compatible (in the past, matching characters were required), but were
   // not insisting on them being present in new code.
-  if (Length(TagParameter) >= 2) and
-     (TagParameter[1] = TagParameter[Length(TagParameter)]) then
-    ReplaceStr := Copy(TagParameter, 2, Length(TagParameter) - 2);
+  if (Length(ReplaceStr) >= 2) and
+     (ReplaceStr[1] = ReplaceStr[Length(ReplaceStr)]) then
+    ReplaceStr := Copy(ReplaceStr, 2, Length(ReplaceStr) - 2);
+
   ReplaceStr := RemoveIndentation(ReplaceStr);
   // Then format pascal code.
   ReplaceStr := FormatPascalCode(ReplaceStr);
@@ -1830,6 +1850,7 @@ procedure TDocGenerator.ExpandDescriptions;
       TagManager.ShortDash := ShortDash;
       TagManager.EnDash := EnDash;
       TagManager.EmDash := EmDash;
+      TagManager.Markdown := Markdown;
 
       Item.RegisterTags(TagManager);
 
@@ -2078,6 +2099,13 @@ procedure TDocGenerator.ExpandDescriptions;
     begin
       ExpandExternalItem(PreExpand, Conclusion);
     end;
+    if (AdditionalFiles <> nil) and (AdditionalFiles.Count > 0) then
+    begin
+      for i := 0 to AdditionalFiles.Count - 1 do
+      begin
+        ExpandExternalItem(PreExpand, AdditionalFiles.Get(i));
+      end;
+    end;
 
     for i := 0 to Units.Count - 1 do begin
       U := Units.UnitAt[i];
@@ -2177,71 +2205,119 @@ end;
 function TDocGenerator.FindGlobal(
   const NameParts: TNameParts): TBaseItem;
 var
-  i: Integer;
+  i, UnitNamePartIdx: Integer;
   Item: TBaseItem;
   U: TPasUnit;
+  NewNameParts: TNameParts;
+  FullUnitName: string;
 begin
   Result := nil;
 
   if ObjectVectorIsNilOrEmpty(Units) then Exit;
 
-  case Length(NameParts) of
+  { Units could have multipart names with dots (a-la namespace).
+    So we first must check whether NameParts contains multiple parts of a unit name
+    and correct the array accordingly.
+    There's no sense in check if NameParts hold a single item. Similarily we start
+    check starting from two-part name as one-part name is default. }
+  if Length(NameParts) > 1 then
+  begin
+    FullUnitName := NameParts[0];
+    UnitNamePartIdx := 1; // start check from two-part name
+    repeat
+      FullUnitName := FullUnitName + '.' + NameParts[UnitNamePartIdx];
+      U := TPasUnit(Units.FindListItem(FullUnitName));
+      if U = nil then
+        Inc(UnitNamePartIdx)
+      else
+        Break;
+    until UnitNamePartIdx >= High(NameParts);
+    { So now we have full unit name and index until which unit name is spread.
+      Construct new nameparts array with unit name glued together. }
+    if (U <> nil) and (UnitNamePartIdx >= 1) then // Skip simple case of single-part unit name
+    begin
+      SetLength(NewNameParts, Length(NameParts) - UnitNamePartIdx);
+      NewNameParts[0] := FullUnitName;
+      for i := 1 to High(NewNameParts) do
+        NewNameParts[i] := NameParts[UnitNamePartIdx + i];
+    end
+    else
+      NewNameParts := NameParts;
+  end
+  else
+    NewNameParts := NameParts;
+
+  case Length(NewNameParts) of
     1: begin
         if (Introduction <> nil) then
         begin
-          if  SameText(Introduction.Name, NameParts[0]) then
+          if  SameText(Introduction.Name, NewNameParts[0]) then
           begin
             Result := Introduction;
             Exit;
           end;
-          Result := Introduction.FindItem(NameParts[0]);
+          Result := Introduction.FindItem(NewNameParts[0]);
           if Result <> nil then Exit;
         end;
 
         if (Conclusion <> nil) then
         begin
-          if  SameText(Conclusion.Name, NameParts[0]) then
+          if  SameText(Conclusion.Name, NewNameParts[0]) then
           begin
             Result := Conclusion;
             Exit;
           end;
-          Result := Conclusion.FindItem(NameParts[0]);
+          Result := Conclusion.FindItem(NewNameParts[0]);
           if Result <> nil then Exit;
+        end;
+
+        if (AdditionalFiles <> nil) and (AdditionalFiles.Count > 0) then
+        begin
+          for i := 0 to AdditionalFiles.Count - 1 do
+          begin
+            if  SameText(AdditionalFiles.Get(i).Name, NewNameParts[0]) then
+            begin
+              Result := AdditionalFiles.Get(i);
+              Exit;
+            end;
+            Result := AdditionalFiles.Get(i).FindItem(NewNameParts[0]);
+            if Result <> nil then Exit;
+          end;
         end;
 
         for i := 0 to Units.Count - 1 do
          begin
            U := Units.UnitAt[i];
 
-           if SameText(U.Name, NameParts[0]) then
+           if SameText(U.Name, NewNameParts[0]) then
            begin
              Result := U;
              Exit;
            end;
 
-           Result := U.FindItem(NameParts[0]);
+           Result := U.FindItem(NewNameParts[0]);
            if Result <> nil then Exit;
          end;
        end;
     2: begin
          { object.field_method_property }
          for i := 0 to Units.Count - 1 do begin
-           Result := Units.UnitAt[i].FindInsideSomeClass(NameParts[0], NameParts[1]);
+           Result := Units.UnitAt[i].FindInsideSomeClass(NewNameParts[0], NewNameParts[1]);
            if Assigned(Result) then Exit;
          end;
 
          { unit.cio_var_const_type }
-         U := TPasUnit(Units.FindListItem(NameParts[0]));
+         U := TPasUnit(Units.FindListItem(NewNameParts[0]));
          if Assigned(U) then
-           Result := U.FindItem(NameParts[1]);
+           Result := U.FindItem(NewNameParts[1]);
        end;
     3: begin
          { unit.objectorclassorinterface.fieldormethodorproperty }
-         U := TPasUnit(Units.FindListItem(NameParts[0]));
+         U := TPasUnit(Units.FindListItem(NewNameParts[0]));
          if (not Assigned(U)) then Exit;
-         Item := U.FindItem(NameParts[1]);
+         Item := U.FindItem(NewNameParts[1]);
          if (not Assigned(Item)) then Exit;
-         Item := Item.FindItem(NameParts[2]);
+         Item := Item.FindItem(NewNameParts[2]);
          if (not Assigned(Item)) then Exit;
          Result := Item;
          Exit;
@@ -2795,13 +2871,15 @@ begin
     begin
       if Assigned(LNode.Parent) and (LNode.Parent.Name <> '') then
       begin
-        WriteDirectLine('  ' + LNode.Name + ' -> '+LNode.Parent.Name);
+        { Note that LNode.Parent.Name may be a qualified name,
+          like "Classes.TThread", so it really requires quoting with "" for GraphViz. }
+        WriteDirectLine('  "' + LNode.Name + '" -> "' + LNode.Parent.Name + '"');
       end;
 
       if Assigned(LNode.Item) and (LNode.Item is TPasCio) then
       begin
-        WriteDirectLine('  ' + LNode.Name +
-          ' [href="' + TPasCio(LNode.Item).OutputFileName + '"]');
+        WriteDirectLine('  "' + LNode.Name +
+          '" [href="' + TPasCio(LNode.Item).OutputFileName + '"]');
       end;
 
       LNode := FClassHierarchy.NextItem(LNode);
@@ -2903,6 +2981,7 @@ end;
 procedure TDocGenerator.StartSpellChecking(const AMode: string);
 var
   WordsToIgnore: TStringList;
+  i: Integer;
 
   procedure AddSubItems(Items: TBaseItems);
   var
@@ -2990,6 +3069,14 @@ begin
       begin
         WordsToIgnore.Add(Conclusion.Name);
         AddSubItems(Conclusion.Anchors);
+      end;
+      if (AdditionalFiles <> nil) and (AdditionalFiles.Count > 0) then
+      begin
+        for i := 0 to AdditionalFiles.Count - 1 do
+        begin
+          WordsToIgnore.Add(AdditionalFiles.Get(i).Name);
+          AddSubItems(AdditionalFiles.Get(i).Anchors);
+        end;
       end;
       AddSubItems(Units);
       FAspellProcess.SetIgnoreWords(WordsToIgnore);
@@ -3683,6 +3770,16 @@ begin
   WriteExternal(Conclusion, trConclusion);
 end;
 
+procedure TDocGenerator.WriteAdditionalFiles;
+var
+  i: Integer;
+begin
+  for i := 0 to AdditionalFiles.Count - 1 do
+  begin
+    WriteExternal(AdditionalFiles.Get(i), trAdditionalFile);
+  end;
+end;
+
 procedure TDocGenerator.PreHandleAnchorTag(
   ThisTag: TTag; var ThisTagData: TObject;
   EnclosingTag: TTag; var EnclosingTagData: TObject;
@@ -3882,7 +3979,11 @@ end;
 
 function TDocGenerator.FormatImage(FileNames: TStringList): string;
 begin
-  Result := ExpandFileName(FileNames[0]);
+  // Result := FileNames[0];
+  { Show relative path, since absolute path is
+    - unportable (doesn't make sense on other systems than current)
+    - makes our tests output not reproducible. }
+  Result := ExtractRelativePath(FCurrentItem.BasePath, FileNames[0]);
 end;
 
 procedure TDocGenerator.HandleIncludeTag(

@@ -1,5 +1,5 @@
 {
-  Copyright 1998-2016 PasDoc developers.
+  Copyright 1998-2018 PasDoc developers.
 
   This file is part of "PasDoc".
 
@@ -31,33 +31,11 @@ uses PasDoc_Utils, PasDoc_Items;
 { Put this in <head> of every page with search button. }
 function TipueSearchButtonHead: string;
 
-const
-  { Put this inside the page contents --- it will make a form with search button.
-    You will need to use Format to insert the localized word for "Search", e.g.:
-    Format(TipueSearchButton, ['Search'])
-    for English.}
-  TipueSearchButton =
-    '<form class="search-form" action="_tipue_results.html">' +
-    '<div class="search-input"><input type="text" name="q" id="tipue_search_input"></div>' +
-    { TODO: Add a value="Search" to <input type="button" ...>
-      and hide it visually by one of the CSS tricks on
-      http://stackoverflow.com/questions/12723937/remove-value-attribute-of-input-element-using-css-only }
-    '<div class="search-button"><input type="button" id="tipue_search_button" onclick="this.form.submit();"></div>' +
-    '</form>' + LineEnding +
-    '<div style="clear: both"></div>' + LineEnding +
-    LineEnding +
-    '<script type="text/javascript">' + LineEnding +
-    '$(document).ready(function() {' + LineEnding +
-    '    $(''#tipue_search_input'').tipuesearch({' + LineEnding +
-    '        /* 10 items to display seems standard */' + LineEnding +
-    '        ''show'': 10,' + LineEnding +
-    '        /* For PasDoc docs, showing urls is not very useful,' + LineEnding +
-    '           since the page title already shows the unit and identifier. */' + LineEnding +
-    '        ''showURL'': false' + LineEnding +
-    '    });' + LineEnding +
-    '});' + LineEnding +
-    '</script>' + LineEnding;
-
+{ Put this at a place where Tipue button should appear.
+  It will make a form with search button.
+  You will need to use Format to insert the localized word for "Search", e.g.:
+  Format(TipueSearchButton, ['Search']) for English. }
+function TipueSearchButton: string;
 
 { Adds some additional files to html documentation, needed for tipue engine.
 
@@ -67,6 +45,7 @@ const
   Units must be non-nil. It will be used to generate index data for tipue. }
 procedure TipueAddFiles(Units: TPasUnits;
   const Introduction, Conclusion: TExternalItem;
+  const AdditionalFiles: TExternalItemList;
   const Head, BodyBegin, BodyEnd: string;
   const LanguageCode: string;
   const OutputPath: string);
@@ -80,8 +59,22 @@ begin
   Result := '<link rel="stylesheet" type="text/css" href="tipuesearch/tipuesearch.css">' + LineEnding;
 end;
 
+function TipueSearchButton: string;
+begin
+  Result :=
+    '<form class="search-form" action="_tipue_results.html">' +
+    '<div class="search-input"><input type="text" name="q" id="tipue_search_input"></div>' +
+    { TODO: Add a value="Search" to <input type="button" ...>
+      and hide it visually by one of the CSS tricks on
+      http://stackoverflow.com/questions/12723937/remove-value-attribute-of-input-element-using-css-only }
+    '<div class="search-button"><input type="button" id="tipue_search_button" onclick="this.form.submit();"></div>' +
+    '</form>' + LineEnding +
+    '<div style="clear: both"></div>' + LineEnding;
+end;
+
 procedure TipueAddFiles(Units: TPasUnits;
   const Introduction, Conclusion: TExternalItem;
+  const AdditionalFiles: TExternalItemList;
   const Head, BodyBegin, BodyEnd: string;
   const LanguageCode: string;
   const OutputPath: string);
@@ -90,6 +83,7 @@ procedure TipueAddFiles(Units: TPasUnits;
   var
     OutFile: TextFile;
     NeedsLeadingComma: boolean;
+    i: Integer;
 
     { Write one line of index data.
       See http://www.tipue.com/help/search/data/.
@@ -108,7 +102,7 @@ procedure TipueAddFiles(Units: TPasUnits;
       Write(OutFile, '     {"title": "', Title,
         '", "text": "', LongDescription,
         '", "tags": "', { no tags for now? Or maybe use here ShortDescription? }
-        '", "loc": "', URL, '"}');
+        '", "url": "', URL, '"}');
       NeedsLeadingComma := true;
     end;
 
@@ -125,7 +119,11 @@ procedure TipueAddFiles(Units: TPasUnits;
           (cChar: '\'; sSpec: '\\')
         );
       begin
-        Result := StringReplaceChars(S, ReplacementArray);
+        { Strip HTML tags, as Tipue results printing assumes that text contains
+          no HTML elements, otherwise they are inserted into page source
+          and break HTML rendering. }
+        Result := StripHtml(S);
+        Result := StringReplaceChars(Result, ReplacementArray);
       end;
 
     var
@@ -146,13 +144,16 @@ procedure TipueAddFiles(Units: TPasUnits;
         Note that LongDescription will not be shown to user anywhere
         (it will only be searched by tipue), so we don't care how
         things look here. We just glue some properties of Item together. }
-      LongDescription := EscapeIndexEntry(Item.DetailedDescription) +
+      LongDescription :=
+        EscapeIndexEntry(Item.DetailedDescription) +
         ' ' + EscapeIndexEntry(Item.Authors.Text);
+      if Item is TPasItem then
+        LongDescription := LongDescription +
+          ' ' + EscapeIndexEntry(TPasItem(Item).Params.Text(' ', ' ')) +
+          ' ' + EscapeIndexEntry(TPasItem(Item).Raises.Text(' ', ' '));
       if Item is TPasMethod then
         LongDescription := LongDescription +
-          ' ' + EscapeIndexEntry(TPasMethod(Item).Params.Text(' ', ' ')) +
-          ' ' + EscapeIndexEntry(TPasMethod(Item).Returns) +
-          ' ' + EscapeIndexEntry(TPasMethod(Item).Raises.Text(' ', ' '));
+          ' ' + EscapeIndexEntry(TPasMethod(Item).Returns);
       if Item is TPasEnum then
       begin
         for i := 0 to TPasEnum(Item).Members.Count - 1 do
@@ -229,6 +230,13 @@ procedure TipueAddFiles(Units: TPasUnits;
         WriteItemIndexData(Introduction);
       if Conclusion <> nil then
         WriteItemIndexData(Conclusion);
+      if (AdditionalFiles <> nil) and (AdditionalFiles.Count > 0) then
+      begin
+        for i := 0 to AdditionalFiles.Count - 1 do
+        begin
+          WriteItemIndexData(AdditionalFiles.Get(i));
+        end;
+      end;
       WriteUnitsIndexData(Units);
 
       Writeln(OutFile, LineEnding + ']};');
@@ -260,7 +268,7 @@ begin
 
   DataToFile(OutputPath + 'tipuesearch' + PathDelim + 'search.png', TipueSearchImage);
   DataToFile(OutputPath + 'tipuesearch' + PathDelim + 'loader.gif', TipueLoaderImage);
-  WriteTipueIndexData(OutputPath + 'tipuesearch' + PathDelim + 'tipuesearch_data.js');
+  WriteTipueIndexData(OutputPath + 'tipuesearch' + PathDelim + 'tipuesearch_content.js');
 end;
 
 end.

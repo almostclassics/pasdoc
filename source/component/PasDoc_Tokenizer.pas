@@ -1,5 +1,5 @@
 {
-  Copyright 1998-2016 PasDoc developers.
+  Copyright 1998-2018 PasDoc developers.
 
   This file is part of "PasDoc".
 
@@ -151,6 +151,7 @@ type
     SD_DEFAULT,
     SD_DISPID,
     SD_DYNAMIC,
+    SD_EXPERIMENTAL,
     SD_EXPORT,
     SD_EXTERNAL,
     SD_FAR,
@@ -190,6 +191,8 @@ type
     SD_PLATFORM,
     SD_VARARGS,
     SD_FINAL);
+
+  TStandardDirectives = set of TStandardDirective;
 
 const
   { Names of the token types. All start with lower letter.
@@ -305,6 +308,7 @@ type
   TTokenizer = class(TObject)
   private
     FBufferedCharSize : Integer;
+    FBufferedToken: TToken;
     function StreamPosition: Int64;
   protected
     FOnMessage: TPasDocMessageEvent;
@@ -325,8 +329,7 @@ type
     FStreamName: string;
     FStreamPath: string;
 
-    procedure DoError(const AMessage: string; const AArguments: array of
-      const; const AExitCode: Word);
+    procedure DoError(const AMessage: string; const AArguments: array of const);
     procedure DoMessage(const AVerbosity: Cardinal; const MessageType:
       TPasDocMessageType; const AMessage: string; const AArguments: array of const);
 
@@ -368,8 +371,18 @@ type
     destructor Destroy; override;
     function HasData: Boolean;
     function GetStreamInfo: string;
-    function GetToken: TToken;
-    { Skips all chars until it encounters either $ELSE or $ENDIF compiler defines. }
+    function GetToken(const NilOnEnd: Boolean = false): TToken;
+
+    { Makes the token T next to be returned by GetToken.
+      Also sets T to @nil, to prevent you from freeing it accidentally.
+
+      You cannot have more than one "unget" token.
+      If you only call UnGetToken after some GetToken, you are safe. }
+    procedure UnGetToken(var T: TToken);
+
+    { Skip all chars until it encounters some compiler directive,
+      like $ELSE or $ENDIF.
+      Returns either @nil or a token with MyType = TOK_DIRECTIVE. }
     function SkipUntilCompilerDirective: TToken;
 
     property OnMessage: TPasDocMessageEvent read FOnMessage write FOnMessage;
@@ -411,7 +424,7 @@ const
     array[Low(TStandardDirective)..High(TStandardDirective)] of PChar =
   ('x', // lowercase letters never match
     'ABSOLUTE', 'ABSTRACT', 'APIENTRY', 'ASSEMBLER', 'AUTOMATED',
-    'CDECL', 'CVAR', 'DEFAULT', 'DISPID', 'DYNAMIC', 'EXPORT', 'EXTERNAL',
+    'CDECL', 'CVAR', 'DEFAULT', 'DISPID', 'DYNAMIC', 'EXPERIMENTAL', 'EXPORT', 'EXTERNAL',
     'FAR', 'FORWARD', 'GENERIC', 'HELPER', 'INDEX', 'INLINE', 'MESSAGE', 'NAME', 'NEAR',
     'NODEFAULT', 'OPERATOR', 'OUT', 'OVERLOAD', 'OVERRIDE', 'PASCAL', 'PRIVATE',
     'PROTECTED', 'PUBLIC', 'PUBLISHED', 'READ', 'REFERENCE', 'REGISTER',
@@ -430,7 +443,7 @@ function KeyWordByName(const Name: string): TKeyword;
 implementation
 
 uses
-  SysUtils;
+  SysUtils, Math;
 
 function KeyWordByName(const Name: string): TKeyword;
 var
@@ -557,6 +570,7 @@ end;
 destructor TTokenizer.Destroy;
 begin
   Stream.Free;
+  FBufferedToken.Free;
   inherited;
 end;
 
@@ -593,11 +607,11 @@ end;
 
 { ---------------------------------------------------------------------------- }
 
-procedure TTokenizer.DoError(const AMessage: string; const AArguments: array
-  of const; const AExitCode: Word);
+procedure TTokenizer.DoError(const AMessage: string;
+  const AArguments: array of const);
 begin
   raise EPasDoc.Create(AMessage + Format(' (at %s)', [GetStreamInfo]),
-    AArguments, AExitCode);
+    AArguments, 2);
 end;
 
 { ---------------------------------------------------------------------------- }
@@ -722,7 +736,7 @@ end;
 
 { ---------------------------------------------------------------------------- }
 
-function TTokenizer.GetToken: TToken;
+function TTokenizer.GetToken(const NilOnEnd: Boolean = false): TToken;
 var
   c: Char;
   MaybeKeyword: TKeyword;
@@ -730,21 +744,32 @@ var
   J: Integer;
   BeginPosition: integer;
 begin
+  if Assigned(FBufferedToken) then
+  begin
+    { we have a token buffered, we'll return this one }
+    Result := FBufferedToken;
+    FBufferedToken := nil;
+    Exit;
+  end;
+
   Result := nil;
   BeginPosition := StreamPosition; //used in finally
   try
     if GetChar(c) = 0 then
-      DoError('Tokenizer: could not read character', [], 0);
+      if NilOnEnd then
+        Exit(nil)
+      else
+        DoError('Tokenizer: could not read character', []);
 
     if IsCharInSet(c, Whitespace) then
     begin
       if ReadToken(c, Whitespace, TOK_WHITESPACE, Result) then
           { after successful reading all whitespace characters, update
-            internal row counter to be able to state current row on errors;
-            TODO: will fail on Mac files (row is 13) }
-        Inc(Row, StrCountCharA(Result.Data, #10))
+            internal row counter to be able to state current row on errors.
+            Count both types of possible EOLs and select the max one }
+        Inc(Row, Max(StrCountCharA(Result.Data, #10), StrCountCharA(Result.Data, #13)))
       else
-        DoError('Tokenizer: could not read character', [], 0);
+        DoError('Tokenizer: could not read character', []);
     end else
     if IsCharInSet(c, IdentifierStart) then
     begin
@@ -776,7 +801,7 @@ begin
             try
               { Note that StrToInt automatically handles hex characters when
                 number starts from $. So below will automatically work for them. }
-              Result.StringContent := Chr(StrToInt(SEnding(Result.Data, 2)));
+              Result.StringContent := WideChar(StrToInt(SEnding(Result.Data, 2)));
             except
               { In case of EConvertError, make a warning and continue.
                 Result.StringContent will remain empty, which isn't a real problem. }
@@ -791,7 +816,7 @@ begin
         '(': begin
             c := ' ';
             if HasData and not PeekChar(c) then
-              DoError('Tokenizer: could not read character', [], 0);
+              DoError('Tokenizer: could not read character', []);
             case c of
               '*': begin
                   ConsumeChar;
@@ -888,6 +913,12 @@ begin
           end;
         '\': Result := CreateSymbolToken(SYM_BACKSLASH);
         '%': Result := ReadAttAssemblerRegister;
+        '&': begin
+               if not ((GetChar(C) > 0) and
+                       IsCharInSet(C, IdentifierStart) and
+                       ReadToken(C, IdentifierOther, TOK_IDENTIFIER, Result)) then
+                 DoError('Cannot read valid identifier after "&" prefix', []);
+             end;
       else begin
           for J := 0 to NUM_SINGLE_CHAR_SYMBOLS - 1 do begin
             if (c = SingleCharSymbols[J].c) then begin
@@ -895,7 +926,7 @@ begin
               exit;
             end;
           end;
-          DoError('Invalid character (code %d) in Pascal input stream', [Ord(C)], 0);
+          DoError('Invalid character ("%s", code %d) in Pascal input stream', [C, Ord(C)]);
         end;
       end;
   finally
@@ -933,17 +964,32 @@ end;
 
 { ---------------------------------------------------------------------------- }
 
+// Check if current char is EOL and increases `Row` counter. `PrevCh` is previously
+// taken char to not increase counter on CR-LF
+procedure HandleEOL(PrevCh, CurrCh: Char; var Row: Integer);
+begin
+  case CurrCh of
+    #10:
+      // handle #13#10 case
+      if PrevCh <> #13 then
+        Inc(Row);
+    #13:
+      Inc(Row);
+  end;
+end;
+
 function TTokenizer.ReadCommentType1: TToken;
 var
-  c: Char;
+  c, prevC: Char;
 begin
   Result := TToken.Create(TOK_COMMENT_EXT);
   with Result do
   begin
-    CommentContent := '';
+    CommentContent := ''; prevC := #0;
     repeat
       if not HasData or (GetChar(c) = 0) then Exit;
-      if c = #10 then Inc(Row);
+      HandleEOL(prevC, c, Row);
+      prevC := c;
       CommentContent := CommentContent + c; // TODO: Speed up!
     until c = '}';
 
@@ -957,16 +1003,17 @@ end;
 
 function TTokenizer.ReadCommentType2: TToken;
 var
-  c: Char;
+  c, prevC: Char;
 begin
   Result := TToken.Create(TOK_COMMENT_PAS);
-  Result.CommentContent := '';
+  Result.CommentContent := ''; prevC := #0;
   if not HasData or (GetChar(c) = 0) then Exit;
   repeat
     Result.CommentContent := Result.CommentContent + c;
 
     if c <> '*' then begin
-      if c = #10 then Inc(Row);
+      HandleEOL(prevC, c, Row);
+      prevC := c;
       if not HasData or (GetChar(c) = 0) then Exit;
     end else begin
       if not HasData or (GetChar(c) = 0) then Exit;
@@ -986,7 +1033,7 @@ end;
 
 function TTokenizer.ReadCommentType3: TToken;
 var
-  c: Char;
+  C: Char;
   pos: Integer;
   Prefix: string;
 begin
@@ -997,17 +1044,22 @@ begin
     pos := 0;
 
     Prefix := '//';
-    while HasData and (GetChar(c) > 0) do
+    while HasData and PeekChar(C) do
     begin
       case c of
-        #10: begin Inc(Row); break end;
-        #13: break;
-        else if (c = '/') and (pos = 0) then
+        { break without consuming newline characters.
+          This way line numbers about back comments will indicate the correct line. }
+        #10, #13: Break;
+        else
+        begin
+          if (c = '/') and (pos = 0) then
           begin
             MyType := TOK_COMMENT_HELPINSIGHT;
             Prefix := '///';
           end else
             CommentContent := CommentContent + c;
+          ConsumeChar;
+        end;
       end;
       Inc(pos);
     end;
@@ -1039,13 +1091,6 @@ end;
 { ---------------------------------------------------------------------------- }
 
 function TTokenizer.ReadLiteralString(var t: TToken): Boolean;
-
-  procedure ReleaseToken;
-  begin
-    t.Free;
-    t := nil;
-  end;
-
 var
   c: Char;
   Finished: Boolean;
@@ -1057,17 +1102,17 @@ begin
 
   repeat
     if not (Stream.Position < Stream.Size) then begin
-      ReleaseToken;
-      DoError('Tokenizer: unexpected end of stream', [], 0);
+      FreeAndNil(t);
+      DoError('Tokenizer: unexpected end of stream', []);
     end;
     if GetChar(c) = 0 then begin
-      ReleaseToken;
-      DoError('Tokenizer: could not read character', [], 0);
+      FreeAndNil(t);
+      DoError('Tokenizer: could not read character', []);
     end;
     if c = QuoteChar then begin
       if not PeekChar(c) then begin
-        ReleaseToken;
-        DoError('Tokenizer: could not peek character', [], 0)
+        FreeAndNil(t);
+        DoError('Tokenizer: could not peek character', [])
       end;
       if c = QuoteChar then { escaped single quote within string } begin
         ConsumeChar;
@@ -1078,6 +1123,14 @@ begin
       end;
       t.Data := t.Data + QuoteChar;
     end
+    else
+    if CharInSet(c, [#10, #13]) then
+    begin
+      FreeAndNil(t);
+      { Note: Do not show here exact code (#13 or #10) to make auto tests succeed,
+        regardless of line endings in cloned repo (Windows or Linux). }
+      DoError('Newline inside a literal string is not allowed', []);
+    end
     else begin
       t.Data := t.Data + c;
     end;
@@ -1087,7 +1140,7 @@ begin
     if not Finished then
       T.StringContent := T.StringContent + c;
   until Finished;
-  ReadLiteralString := True;
+  Result := True;
 end;
 
 { ---------------------------------------------------------------------------- }
@@ -1126,45 +1179,23 @@ begin
 end;
 
 function TTokenizer.SkipUntilCompilerDirective: TToken;
-var
-  c: Char;
 begin
   Result := nil;
   repeat
-    if GetChar(c) > 0 then
-      case c of
-        '{':
-          begin
-            Result := ReadCommentType1;
-            CheckForDirective(Result);
-            if Result.MyType = TOK_DIRECTIVE then break;
-            FreeAndNil(Result);
-          end;
-        '(':
-          begin
-            if PeekChar(c) and (c = '*') then
-            begin
-              ConsumeChar;
-              Result := ReadCommentType2;
-              CheckForDirective(Result);
-              if Result.MyType = TOK_DIRECTIVE then break;
-              FreeAndNil(Result);
-            end;
+    FreeAndNil(Result);
+    Result := GetToken(true);
+    CheckForDirective(Result);
+    if Result.MyType = TOK_DIRECTIVE then break;
+  until false;
+end;
 
-            (* If C was not a '*', then we don't consume it here.
-               This is important, because C could be #10 (indicates
-               newline, so we must Inc(Row)) or even '{' (which could
-               indicate compiler directive). And sequences like
-               '('#10 and '({$ifdef ...' should work, see
-               ../../tests/error_line_number_3.pas and
-               ../../tests/ok_not_defined_omit.pas *)
+procedure TTokenizer.UnGetToken(var t: TToken);
+begin
+  if Assigned(FBufferedToken) then
+    DoError('Cannot UnGet more than one token in TTokenizer', []);
 
-          end;
-        #10: Inc(Row);
-      end
-    else
-      DoError('Could not read character', [], 0);
-  until False;
+  FBufferedToken := t;
+  t := nil;
 end;
 
 end.

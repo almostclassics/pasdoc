@@ -5,23 +5,27 @@ set -eu
 # must be the directory of the script, i.e. tests/scripts/
 # in pasdoc's sources.
 #
-# See ../README file for docs for this script.
+# See ../README.md file for docs for this script.
 
 # functions ------------------------------------------------------------
 
 run_echo ()
 {
   echo "$@"
-  scripts/find_all_tests_for_check_cache.sh | "$@"
+  scripts/find_all_tests_for_check_cache.sh | "$@" \
+    > scripts/check_cache_format_independent_tmp/pasdoc_output.txt
 }
 
 pasdoc_call ()
 {
   echo 'Running pasdoc:'
-  run_echo pasdoc -S - --exclude-generator "$@"
+  run_echo "${PASDOC_BIN}" -S - --exclude-generator "$@"
 }
 
 # ------------------------------------------------------------
+
+# Assume pasdoc is on $PATH, if PASDOC_BIN not set.
+PASDOC_BIN="${PASDOC_BIN:-pasdoc}"
 
 OUTPUT_FORMAT_1="$1"
 OUTPUT_FORMAT_2="$2"
@@ -35,6 +39,8 @@ mkdir -p \
   check_cache_format_independent_tmp/3/
 
 cd ..
+
+echo "Checking cache-independent between formats ${OUTPUT_FORMAT_1} and ${OUTPUT_FORMAT_2}"
 
 # No cache, format 1
 pasdoc_call \

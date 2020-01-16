@@ -1,5 +1,5 @@
 {
-  Copyright 1998-2016 PasDoc developers.
+  Copyright 1998-2018 PasDoc developers.
 
   This file is part of "PasDoc".
 
@@ -325,6 +325,7 @@ type
     FURLLink: TStringConverter;
     FOnTryAutoLink: TTryAutoLinkEvent;
     FPreExecute: boolean;
+    FMarkdown: boolean;
 
     function DoConvertString(const s: string): string;
     function DoURLLink(const s: string): string;
@@ -510,11 +511,385 @@ type
       ) }
     property PreExecute: boolean
       read FPreExecute write FPreExecute;
+
+    { When @name is @true, Markdown syntax is considered }
+    property Markdown: boolean
+      read FMarkdown write FMarkdown default false;
   end;
 
 implementation
 
 uses PasDoc_Utils, StrUtils;
+
+type
+  TMarkdownBlock = record
+    Open, Close: string;
+    PasDocTag: string;
+  end;
+
+const
+  MarkDownEscapeChar = '\';
+  // Markdown blocks are rendered only when:
+  //   - Opening tag is preceded by ASCII whitespace or ASCII punctuation
+  //   - Closing tag is followed by ASCII whitespace or ASCII punctuation
+  // One-char Markdown blocks (italic *, italic _, code `) must meet additional condition:
+  //   - Opening tag is followed by non-ASCII whitespace
+  // to minimize false positives when block characters are used not for Markdown
+  // ( 'X = Y * Z', 'underscore _ is used to name some deprecated thing: something_').
+  // Logic beneath follows Occam's razor principle - as these blocks add styling to
+  // some content, this content shouldn't start and end with whitespaces.
+  // No Unicode categories used, just plain ASCII.
+  MarkdownBlocks: array [0..6] of TMarkdownBlock =
+    (
+      (Open: '```pascal';  Close: '```';  PasDocTag: 'longcode'), // must be checked first to not mess with ``` or single `
+      (Open: '```';  Close: '```';  PasDocTag: 'preformatted'), // must be checked first to not mess with single `
+      (Open: '`';    Close: '`';    PasDocTag: 'code'),
+      (Open: '**';   Close: '**';   PasDocTag: 'bold'),
+      (Open: '__';   Close: '__';   PasDocTag: 'bold'),
+      (Open: '*';    Close: '*';    PasDocTag: 'italic'),
+      (Open: '_';    Close: '_';    PasDocTag: 'italic')
+    );
+  ASCIIPunctuation = ['!', '"', '#', '$', '%', '&', '''', '(', ')', '*', '+', ',',
+    '-', '.', '/', ':', ';', '<', '=', '>', '?', '@', '[', '\', ']', '^', '_',
+    '`', '{', '|', '}', '~'];
+  MarkdownBlockBoundaries = WhiteSpace + ASCIIPunctuation;
+  // Set of chars markdown blocks could start with. To speedup checking
+  // All first chars of MarkdownBlocks[x].Open must be here. This could be automated
+  // but it's not so complicated to keep this set actual
+  MarkdownBlockStartChars = ['`', '*', '_'];
+  MarkdownUListMarkers = ['-', '*'];
+  MarkdownOListMarkers = ['0'..'9'];
+  // Set of chars markdown lists could start with. To speedup checking
+  MarkdownListStartChars = MarkdownUListMarkers + MarkdownOListMarkers + WhiteSpaceNotNL;
+  MarkdownOListCloseChars = ['.', ')'];
+  PasDocListTags: array[boolean] of string =
+    ('unorderedlist', 'orderedlist');
+
+{ This checks whether we are looking (i.e. Description[Offset]
+  starts with) at a paragraph marker
+  (i.e. newline +
+        optional whitespace +
+        newline +
+        some more optional whitespaces and newlines)
+  and if it is so, returns true and sets OffsetEnd to the next
+  index in Description after this paragraph marker. }
+function FindParagraph(const Description: string; Offset: Integer;
+  out OffsetEnd: Integer): boolean;
+var i: Integer;
+begin
+  Result := false;
+
+  i := Offset;
+  while SCharIs(Description, i, WhiteSpaceNotNL) do Inc(i);
+  if not SCharIs(Description, i, WhiteSpaceNL) then Exit;
+  { In case newline is two-characters wide, read it to the end
+    (to not accidentally take #13#10 as two newlines.) }
+  Inc(i);
+  if (i <= Length(Description)) and
+     ( ((Description[i-1] = #10) and (Description[i] = #13)) or
+       ((Description[i-1] = #13) and (Description[i] = #10))
+     ) then
+    Inc(i);
+  while SCharIs(Description, i, WhiteSpaceNotNL) do Inc(i);
+  if not SCharIs(Description, i, WhiteSpaceNL) then Exit;
+
+  { OK, so we found 2nd newline. So we got paragraph marker.
+    Now read it to the end. }
+  Result := true;
+  while SCharIs(Description, i, WhiteSpace) do Inc(i);
+  OffsetEnd := i;
+end;
+
+{ This checks whether we are looking (i.e. Description[Offset]
+  starts with) at some char from Chars set.
+  If true, then it also sets OffsetEnd to next index after all chars from set. }
+function FindChars(const Description: string; Offset: Integer;
+  const Chars: TCharSet; out OffsetEnd: Integer): boolean;
+begin
+  Result := SCharIs(Description, Offset, Chars);
+  if Result then
+  begin
+    OffsetEnd := Offset + 1;
+    while SCharIs(Description, OffsetEnd, Chars) do Inc(OffsetEnd);
+  end;
+end;
+
+{ This checks whether we are looking (i.e. Description[Offset]
+  starts with) at some char NOT from Chars set.
+  If true, then it also sets OffsetEnd to next index after all chars NOT from set.
+  If no such char found, OffsetEnd = Length(Description) + 1 }
+function FindCharsNot(const Description: string; Offset: Integer;
+  const Chars: TCharSet; out OffsetEnd: Integer): boolean;
+var
+  StrLen: Integer;
+begin
+  Result := not SCharIs(Description, Offset, Chars);
+  if Result then
+  begin
+    StrLen := Length(Description);
+    OffsetEnd := Offset + 1;
+    while (OffsetEnd <= StrLen) and not SCharIs(Description, OffsetEnd, Chars) do Inc(OffsetEnd);
+  end;
+end;
+
+{
+  This checks if a known Markdown block starts at Description[Offset].
+  If yes, it returns true and sets
+  -- PasDocTagName to name of PasDoc tag corresponding to current Markdown block
+  -- Parameters to contents of this block
+  -- OffsetEnd to the index of *next* character in Description right
+     after this block
+}
+function CheckMarkdown(const Description: string; Offset: Integer;
+  out PasDocTagName: string; out Parameters: string; out OffsetEnd: Integer): Boolean;
+var
+  CurrOffset, BlockEndPos, MdBlockIdx: Integer;
+begin
+  Result := False;
+
+  // Fast check if we have markdown block opening
+  if not SCharIs(Description, Offset, MarkdownBlockStartChars) then Exit;
+  if (Offset > 1) and SCharIs(Description, Offset - 1, MarkDownEscapeChar) then Exit; // skip escaped chars
+  if (Offset > 1) and not SCharIs(Description, Offset - 1, MarkdownBlockBoundaries) then Exit; // opening block must be preceded by a block delimiter char
+
+  MdBlockIdx := -1;
+  for BlockEndPos := Low(MarkdownBlocks) to High(MarkdownBlocks) do
+    if Copy(Description, Offset, Length(MarkdownBlocks[BlockEndPos].Open)) = MarkdownBlocks[BlockEndPos].Open then
+    begin
+      MdBlockIdx := BlockEndPos;
+      Break;
+    end;
+  if MdBlockIdx = -1 then Exit; { exit with false }
+
+  CurrOffset := Offset + Length(MarkdownBlocks[MdBlockIdx].Open);
+
+  // Check if this is one-char block and a whitespace follows - skip these cases
+  if (Length(MarkdownBlocks[MdBlockIdx].Open) = 1) and
+    SCharIs(Description, CurrOffset, WhiteSpace) then
+    Exit; { exit with false }
+
+  // now search for markdown block end
+  repeat
+    BlockEndPos := PosEx(MarkdownBlocks[MdBlockIdx].Close, Description, CurrOffset);
+    if BlockEndPos = 0 then Exit; { exit with false }
+    // skip escaped chars
+    if SCharIs(Description, BlockEndPos - 1, MarkDownEscapeChar) then
+    begin
+      CurrOffset := BlockEndPos + 1;
+      Continue;
+    end;
+    // block must close with a block delimiter char or end of string
+    if BlockEndPos + Length(MarkdownBlocks[MdBlockIdx].Close) - 1 = Length(Description) then
+      Break;
+    if not SCharIs(Description, BlockEndPos + Length(MarkdownBlocks[MdBlockIdx].Close), MarkdownBlockBoundaries) then
+    begin
+      CurrOffset := BlockEndPos + 1;
+      Continue;
+    end;
+    Break;
+  until False;
+
+  PasDocTagName := MarkdownBlocks[MdBlockIdx].PasDocTag;
+  OffsetEnd := BlockEndPos + Length(MarkdownBlocks[MdBlockIdx].Close);
+  Parameters := Copy(Description, Offset + Length(MarkdownBlocks[MdBlockIdx].Open), BlockEndPos - (Offset + Length(MarkdownBlocks[MdBlockIdx].Open)));
+
+  Result := True;
+end;
+
+{
+  This checks if Markdown list item starts at Description[Offset].
+  Whitespaces are the part of list so Offset could point at one or more whitespaces.
+  If yes, it returns true and sets
+  -- Ordered to true of list is ordered, false otherwise
+  -- OffsetEnd to the index of *next* non-whitespace character in Description right
+     after list marker
+  -- IndentLen to count of whitespace chars between start of line and list marker
+     (for tracking nested lists).
+
+  Markdown list items have the following pattern:
+  [WSP]MARKER[contents]
+  MARKER is:
+    '*'|'-'WSP for ordered lists
+    DIGIT*N'.'|')'WSP for ordered lists
+  where
+    WSP = tab #9 or space #32
+    DIGIT = 0..9
+}
+function CheckMarkdownListItemStart(const Description: string; Offset: Integer;
+  out Ordered: boolean; out OffsetEnd: Integer; out IndentLen: Integer): boolean;
+var MarkerOffset, NewOffsetEnd: Integer;
+begin
+  Result := False;
+  // List item must start from new line
+  if (Offset > 1) and not SCharIs(Description, Offset - 1, WhiteSpaceNL) then Exit;
+
+  // Skip whitespaces also getting indent length
+  MarkerOffset := Offset;
+  FindChars(Description, Offset, WhiteSpaceNotNL, MarkerOffset);
+
+  // Unordered list - "* item"
+  if SCharIs(Description, MarkerOffset, MarkdownUListMarkers) then
+  begin
+    // Whitespace is obligatory
+    if not FindChars(Description, MarkerOffset + 1, WhiteSpaceNotNL, NewOffsetEnd) then
+      Exit;
+    Ordered := False;
+    OffsetEnd := NewOffsetEnd;
+    IndentLen := MarkerOffset - Offset;
+    Result := True;
+  end
+  // Ordered list - "1. item"
+  else if SCharIs(Description, MarkerOffset, MarkdownOListMarkers) then
+  begin
+    // Skip probably multiple digits
+    FindChars(Description, MarkerOffset, MarkdownOListMarkers, NewOffsetEnd);
+    // Closing char and Whitespace are obligatory
+    if not SCharIs(Description, NewOffsetEnd, MarkdownOListCloseChars) then
+      Exit;
+    Inc(NewOffsetEnd);
+    if not FindChars(Description, NewOffsetEnd, WhiteSpaceNotNL, NewOffsetEnd) then
+      Exit;
+    Ordered := True;
+    OffsetEnd := NewOffsetEnd;
+    IndentLen := MarkerOffset - Offset;
+    Result := True;
+  end;
+end;
+
+{
+  This checks if Markdown list item starts at Description[Offset].
+  Whitespaces are the part of list so Offset could point at one or more whitespaces.
+  If yes, it returns true and sets
+  -- PasDocTagName to name of PasDoc tag corresponding to current Markdown block
+  -- Parameters to contents of this block
+  -- OffsetEnd to the index of *next* character in Description right
+     after this block
+  -- LastItemInList to true if list end signature was found
+}
+function CheckMarkdownListItem(const Description: string; Offset: Integer;
+  out PasDocTagName: string; out Parameters: string; out OffsetEnd: Integer;
+  out LastItemInList: boolean): boolean;
+var
+  BDummy, WasDoubleNL: boolean;
+  SDummy: string;
+  StrLen, NewOffsetEnd, IndentLen, IndentWithMarkerLen, OtherIndentLen: Integer;
+begin
+  Result := CheckMarkdownListItemStart(Description, Offset, BDummy, OffsetEnd, IndentLen);
+  if not Result then Exit;
+
+  PasDocTagName := 'item';
+  LastItemInList := False;
+  IndentWithMarkerLen := OffsetEnd - Offset;
+  Offset := OffsetEnd; // start index of item contents
+  StrLen := Length(Description);
+
+  // consume line
+  FindCharsNot(Description, Offset, WhiteSpaceNL, OffsetEnd);
+
+  // now search for end of item content - it must be
+  //   - signature of a next list item with the same (next item of the same list)
+  //     or lesser (item of parent list / start of a new list) indent
+  //   - empty line and optionally a text with lesser indent length
+  //   - end of string
+  repeat
+    // check if we have double-NL which could finalize the list (or not)
+    WasDoubleNL := FindParagraph(Description, OffsetEnd, NewOffsetEnd);
+    if WasDoubleNL then
+    begin
+      // FindParagraph eats whitespaces after newline so we've to take them back
+      while (NewOffsetEnd > 1) and not SCharIs(Description, NewOffsetEnd - 1, WhiteSpaceNL) do
+        Dec(NewOffsetEnd);
+      OffsetEnd := NewOffsetEnd;
+    end
+    else
+    begin
+      // consume all NL's
+      FindChars(Description, OffsetEnd, WhiteSpaceNL, OffsetEnd);
+      if OffsetEnd > StrLen then
+        Break;
+    end;
+    // check for list item start
+    if CheckMarkdownListItemStart(Description, OffsetEnd, BDummy, NewOffsetEnd, OtherIndentLen) then
+    begin
+      // indents equal => it's the next item of current list, finish the loop
+      if IndentLen = OtherIndentLen then
+        Break
+      else
+      // indent of current item greater than new => it's the next item of parent list, finish the loop
+      if IndentLen > OtherIndentLen then
+      begin
+        LastItemInList := True;
+        Break;
+      end
+      else
+      // new indent is greater => nested list. Consume line
+      begin
+        FindCharsNot(Description, OffsetEnd, WhiteSpaceNL, OffsetEnd);
+        Continue;
+      end;
+    end
+    else
+    // it's just a text. Check if it belongs to current item
+    begin
+      // All text not separated with NL*2 goes to current item
+      if not WasDoubleNL then
+      begin
+        FindCharsNot(Description, OffsetEnd, WhiteSpaceNL, OffsetEnd);
+        Continue;
+      end;
+      // Text separated with NL*2 is checked for indent length. Those which have
+      // indent of the same or greater length go to current item
+      FindChars(Description, OffsetEnd, WhiteSpaceNotNL, NewOffsetEnd);
+      OtherIndentLen := NewOffsetEnd - OffsetEnd;
+      if OtherIndentLen >= IndentWithMarkerLen then
+      begin
+        FindCharsNot(Description, OffsetEnd, WhiteSpaceNL, OffsetEnd);
+        Continue;
+      end;
+      // NL*2 + text with lesser indent - the list is finished
+      LastItemInList := True;
+      Break;
+    end;
+  until False;
+
+  if OffsetEnd > StrLen then
+    LastItemInList := True;
+  // OffsetEnd includes newlines after item content so trim them
+  Parameters := TrimRight(Copy(Description, Offset, OffsetEnd - Offset));
+end;
+
+{
+  This checks if Markdown list starts at Description[Offset].
+  Whitespaces are the part of list so Offset could point at one or more whitespaces.
+  If yes, it returns true and sets
+  -- PasDocTagName to name of PasDoc tag corresponding to current Markdown block
+  -- Parameters to contents of this block
+  -- OffsetEnd to the index of *next* character in Description right
+     after this block
+}
+function CheckMarkdownList(const Description: string; Offset: Integer;
+  out PasDocTagName: string; out Parameters: string; out OffsetEnd: Integer): boolean;
+var
+  Ordered, LastItemInList: boolean;
+  IDummy, CurrOffset: Integer;
+  SDummy: string;
+begin
+  // Quick check
+  Result := False;
+  if not SCharIs(Description, Offset, MarkdownListStartChars) then Exit;
+  // Parser eats whitespaces after newline so we've to take them back
+  while (Offset > 1) and not SCharIs(Description, Offset - 1, WhiteSpaceNL) do
+    Dec(Offset);
+  Result := CheckMarkdownListItemStart(Description, Offset, Ordered, OffsetEnd, IDummy);
+  if not Result then Exit;
+
+  PasDocTagName := PasDocListTags[Ordered];
+  CurrOffset := Offset;
+  while CheckMarkdownListItem(Description, CurrOffset, SDummy, SDummy, OffsetEnd, LastItemInList) and
+    not LastItemInList do
+    CurrOffset := OffsetEnd;
+  Parameters := TrimRight(Copy(Description, Offset, OffsetEnd - Offset));
+end;
 
 { TTag ------------------------------------------------------------  }
 
@@ -773,59 +1148,56 @@ var
     end else
     if toParameterRequired in Tag.TagOptions then
     begin
-      { Read Parameters to the end of Description or newline. }
-      while (i <= Length(Description)) and
-            (not IsCharInSet(Description[i], [#10, #13])) do
+      { Read Parameters to the end of Description or newline but consume newline
+        prefixed with "line feed" char \ (just like shell scripts, C lang etc.) }
+      while (i <= Length(Description)) do
+      begin
+        if IsCharInSet(Description[i], WhiteSpaceNL) then
+          if Description[i - 1] = '\' then
+          begin
+            // Copy currently consumed line and start reading from found NL
+            Parameters := Parameters + Trim(Copy(Description, OffsetEnd, i - OffsetEnd - 1));
+            OffsetEnd := i;
+            // Explicitly add all NL's because they will be trimmed otherwise
+            while SCharIs(Description, i, WhiteSpaceNL) do Inc(i);
+            Parameters := Parameters + Copy(Description, OffsetEnd, i - OffsetEnd);
+            OffsetEnd := i;
+          end
+          else
+            Break;
         Inc(i);
-      Parameters := Trim(Copy(Description, OffsetEnd, i - OffsetEnd));
+      end;
+      Parameters := Parameters + Trim(Copy(Description, OffsetEnd, i - OffsetEnd));
       OffsetEnd := i;
     end;
   end;
 
-  { This checks whether we are looking (i.e. Description[FOffset]
-    starts with) at a pargraph marker
-    (i.e. newline +
-          optional whitespace +
-          newline +
-          some more optional whitespaces and newlines)
-    and if it is so, returns true and sets OffsetEnd to the next
-    index in Description after this paragraph marker. }
-  function FindParagraph(out OffsetEnd: Integer): boolean;
-  var i: Integer;
+  { Wrapper to check for Markdown tag }
+  function FindMarkdownTag(out Tag: TTag;
+    out Parameters: string; out OffsetEnd: Integer): Boolean;
+  var
+    TagName: string;
+    Dummy: Boolean;
   begin
-    Result := false;
+    // Check for markdown list
+    // If parent tag is list, then it's contents of a single item.
+    if (EnclosingTag <> nil) and (IndexText(EnclosingTag.Name, PasDocListTags) <> -1) then
+      Result := CheckMarkdownListItem(Description, FOffset, TagName, Parameters, OffsetEnd, Dummy)
+    // otherwise check for whole list
+    else
+      Result := CheckMarkdownList(Description, FOffset, TagName, Parameters, OffsetEnd);
+    // Check for simple markdown block
+    if not Result then
+      Result := CheckMarkdown(Description, FOffset, TagName, Parameters, OffsetEnd);
 
-    i := FOffset;
-    while SCharIs(Description, i, WhiteSpaceNotNL) do Inc(i);
-    if not SCharIs(Description, i, WhiteSpaceNL) then Exit;
-    { In case newline is two-characters wide, read it to the end
-      (to not accidentally take #13#10 as two newlines.) }
-    Inc(i);
-    if (i <= Length(Description)) and
-       ( ((Description[i-1] = #10) and (Description[i] = #13)) or
-         ((Description[i-1] = #13) and (Description[i] = #10))
-       ) then
-      Inc(i);
-    while SCharIs(Description, i, WhiteSpaceNotNL) do Inc(i);
-    if not SCharIs(Description, i, WhiteSpaceNL) then Exit;
+    if not Result then Exit;
 
-    { OK, so we found 2nd newline. So we got paragraph marker.
-      Now read it to the end. }
-    Result := true;
-    while SCharIs(Description, i, WhiteSpace) do Inc(i);
-    OffsetEnd := i;
-  end;
-
-  { This checks whether we are looking (i.e. Description[FOffset]
-    starts with) at some whitespace.
-    If true, then it also sets OffsetEnd to next index after whitespace. }
-  function FindWhitespace(out OffsetEnd: Integer): boolean;
-  begin
-    Result := SCharIs(Description, FOffset, WhiteSpace);
-    if Result then
+    Tag := FTags.FindByName(TagName);
+    if Tag = nil then
     begin
-      OffsetEnd := FOffset + 1;
-      while SCharIs(Description, OffsetEnd, WhiteSpace) do Inc(OffsetEnd);
+      DoMessageNonPre(1, pmtWarning, 'Unknown tag name "%s"', [TagName]);
+      Result := False;
+      Exit;
     end;
   end;
 
@@ -1046,8 +1418,8 @@ begin
 
   while FOffset <= Length(Description) do
   begin
-    if (Description[FOffset] = '@') and
-       FindTag(FoundTag, Params, OffsetEnd) then
+    if ((Description[FOffset] = '@') and FindTag(FoundTag, Params, OffsetEnd)) or
+      (Markdown and FindMarkdownTag(FoundTag, Params, OffsetEnd)) then
     begin
       DoConvert;
 
@@ -1102,9 +1474,11 @@ begin
               DoMessageNonPre(1, pmtWarning,
                 'Tag "%s" is not allowed to have any parameters', [FoundTag.Name]);
             end;
-            ReplaceStr := DoConvertString('@(' + FoundTag.Name) + Params + ConvertString(')');
+            // This ReplaceStr value shoud be overridden by FoundTag.PreExecute/Execute
+            ReplaceStr := DoConvertString('PasDoc cannot expand tag @' + FoundTag.Name + '(') + Params + ConvertString(')');
           end else
-            ReplaceStr := DoConvertString('@' + FoundTag.Name);
+            // This ReplaceStr value shoud be overridden by FoundTag.PreExecute/Execute
+            ReplaceStr := DoConvertString('PasDoc cannot expand tag @' + FoundTag.Name);
 
           { execute tag handler }
           if PreExecute then
@@ -1201,7 +1575,7 @@ begin
       FOffset := FOffset + 1;
       ConvertBeginOffset := FOffset;
     end else
-    if FindParagraph(OffsetEnd) then
+    if FindParagraph(Description, FOffset, OffsetEnd) then
     begin
       DoConvert;
 
@@ -1215,7 +1589,7 @@ begin
     end else
     { FindWhitespace must be checked after FindParagraph,
       otherwise we would take paragraph as just some whitespace. }
-    if FindWhitespace(OffsetEnd) then
+    if FindChars(Description, FOffset, WhiteSpace, OffsetEnd) then
     begin
       DoConvert;
 

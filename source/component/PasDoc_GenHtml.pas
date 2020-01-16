@@ -1,5 +1,5 @@
 {
-  Copyright 1998-2016 PasDoc developers.
+  Copyright 1998-2018 PasDoc developers.
 
   This file is part of "PasDoc".
 
@@ -536,8 +536,8 @@ end;
 
 procedure TGenericHTMLDocGenerator.WriteCIO(HL: integer; const CIO: TPasCio);
 type
-  TSections = (dsDescription, dsHierarchy, dsEnclosingClass, dsInternalCRs,
-  dsInternalTypes, dsFields, dsMethods, dsProperties);
+  TSections = (dsDescription, dsHierarchy, dsEnclosingClass, dsNestedCRs,
+  dsNestedTypes, dsFields, dsMethods, dsProperties);
   TSectionSet = set of TSections;
   TSectionAnchors = array[TSections] of string;
 const
@@ -545,8 +545,8 @@ const
     'PasDoc-Description',
     'PasDoc-Hierarchy',
     'PasDoc-EnclosingClass',
-    'PasDoc-InternalCRs',
-    'PasDoc-InternalTypes',
+    'PasDoc-NestedCRs',
+    'PasDoc-NestedTypes',
     'PasDoc-Fields',
     'PasDoc-Methods',
     'PasDoc-Properties');
@@ -598,7 +598,7 @@ const
     WriteItemsDetailed(CIO.Fields, CIO.ShowVisibility, HL + 1, trFields);
   end;
 
-  procedure WriteInternalCioSummary;
+  procedure WriteNestedCioSummary;
   var
     I, J: Integer;
     LCio: TPasCio;
@@ -621,18 +621,18 @@ const
       end;
     end;
     WriteItemsSummary(CIO.Cios, CIO.ShowVisibility, HL + 1,
-      SectionAnchors[dsInternalCRs], trInternalCR);
+      SectionAnchors[dsNestedCRs], trNestedCR);
   end;
 
-  procedure WriteInternalTypesSummary;
+  procedure WriteNestedTypesSummary;
   begin
     WriteItemsSummary(CIO.Types, CIO.ShowVisibility, HL + 1,
-      SectionAnchors[dsInternalTypes], trInternalTypes);
+      SectionAnchors[dsNestedTypes], trNestedTypes);
   end;
 
-  procedure WriteInternalTypesDetailed;
+  procedure WriteNestedTypesDetailed;
   begin
-    WriteItemsDetailed(CIO.Types, CIO.ShowVisibility, HL + 1, trInternalTypes);
+    WriteItemsDetailed(CIO.Types, CIO.ShowVisibility, HL + 1, trNestedTypes);
   end;
 
   { writes all ancestors of the given item and the item itself }
@@ -673,8 +673,8 @@ begin
   SectionHeads[dsFields ]:= FLanguage.Translation[trFields];
   SectionHeads[dsMethods ]:= FLanguage.Translation[trMethods];
   SectionHeads[dsProperties ]:= FLanguage.Translation[trProperties];
-  SectionHeads[dsInternalTypes]:= FLanguage.Translation[trInternalTypes];
-  SectionHeads[dsInternalCRs]:= FLanguage.Translation[trInternalCR];
+  SectionHeads[dsNestedTypes]:= FLanguage.Translation[trNestedTypes];
+  SectionHeads[dsNestedCRs]:= FLanguage.Translation[trNestedCR];
   SectionHeads[dsEnclosingClass]:= FLanguage.Translation[trEnclosingClass];
 
   SectionsAvailable := [dsDescription];
@@ -687,9 +687,9 @@ begin
   if not ObjectVectorIsNilOrEmpty(CIO.Properties) then
     Include(SectionsAvailable, dsProperties);
   if not ObjectVectorIsNilOrEmpty(CIO.Types) then
-    Include(SectionsAvailable, dsInternalTypes);
+    Include(SectionsAvailable, dsNestedTypes);
   if not ObjectVectorIsNilOrEmpty(CIO.Cios) then
-    Include(SectionsAvailable, dsInternalCRs);
+    Include(SectionsAvailable, dsNestedCRs);
   if CIO.MyObject <> nil then
     Include(SectionsAvailable, dsEnclosingClass);
 
@@ -699,7 +699,7 @@ begin
     begin
       Fv := TPasFieldVariable(CIO.Fields.PasItemAt[I]);
       if Fv.IsConstant then
-        Fv.FullDeclaration := FLanguage.Translation[trInternal] + ' ' +
+        Fv.FullDeclaration := FLanguage.Translation[trNested] + ' ' +
           Fv.FullDeclaration;
     end;
   end;
@@ -717,7 +717,7 @@ begin
       { Most classes don't contain nested types so exclude this stuff
         if not available in order to keep it simple. }
       if (not (Section in SectionsAvailable)) and
-        (Section in [dsEnclosingClass..dsInternalTypes]) then
+        (Section in [dsEnclosingClass..dsNestedTypes]) then
         Continue;
 
       WriteDirect('<div class="one_section">');
@@ -804,14 +804,14 @@ begin
   if AnyItem then
   begin
     WriteHeading(HL + 1, 'overview', FLanguage.Translation[trOverview]);
-    WriteInternalCioSummary;
-    WriteInternalTypesSummary;
+    WriteNestedCioSummary;
+    WriteNestedTypesSummary;
     WriteFieldsSummary;
     WriteMethodsSummary;
     WritePropertiesSummary;
 
     WriteHeading(HL + 1, 'description', FLanguage.Translation[trDescription]);
-    WriteInternalTypesDetailed;
+    WriteNestedTypesDetailed;
     WriteFieldsDetailed;
     WriteMethodsDetailed;
     WritePropertiesDetailed;
@@ -911,7 +911,7 @@ end;
 procedure TGenericHTMLDocGenerator.WriteCodeWithLinks(const p: TPasItem;
   const Code: string; WriteItemLink: boolean);
 begin
-  WriteCodeWithLinksCommon(p, Code, WriteItemLink, '<b>', '</b>');
+  WriteCodeWithLinksCommon(p, Code, WriteItemLink, '<strong>', '</strong>');
 end;
 
 { ---------------------------------------------------------------------------- }
@@ -945,12 +945,13 @@ begin
   WriteVisibilityLegendFile;
   WriteIntroduction;
   WriteConclusion;
+  WriteAdditionalFiles;
   WriteIndex;
   if UseTipueSearch then
   begin
     DoMessage(2, pmtInformation,
       'Writing additional files for tipue search engine', []);
-    TipueAddFiles(Units, Introduction, Conclusion,
+    TipueAddFiles(Units, Introduction, Conclusion, AdditionalFiles,
       MakeHead, MakeBodyBegin, MakeBodyEnd, LanguageCode(FLanguage.Language),
       DestinationDirectory);
   end;
@@ -1146,9 +1147,7 @@ function TGenericHTMLDocGenerator.HasItemLongDescription(const AItem: TPasItem):
 begin
   Result := Assigned(AItem) and
     (
-      AItem.IsDeprecated or
-      AItem.IsPlatformSpecific or
-      AItem.IsLibrarySpecific or
+      (AItem.HintDirectives <> []) or
       (AItem.AbstractDescription <> '') or
       (AItem.DetailedDescription <> '') or
       (AItem is TPasCio) or
@@ -1168,7 +1167,7 @@ procedure TGenericHTMLDocGenerator.WriteItemLongDescription(
   end;
 
   { writes the parameters or exceptions list }
-  procedure WriteParamsOrRaises(Func: TPasMethod; const Caption: TTranslationID;
+  procedure WriteParamsOrRaises(ItemToSearchFrom: TPasItem; const Caption: TTranslationID;
     List: TStringPairVector; LinkToParamNames: boolean;
     const CssListClass: string);
 
@@ -1199,7 +1198,7 @@ procedure TGenericHTMLDocGenerator.WriteItemLongDescription(
       ParamName := List[i].Name;
 
       if LinkToParamNames then
-       ParamName := SearchLink(ParamName, Func, '', true);
+       ParamName := SearchLink(ParamName, ItemToSearchFrom, '', true);
 
       WriteParameter(ParamName, List[i].Value);
     end;
@@ -1274,7 +1273,7 @@ procedure TGenericHTMLDocGenerator.WriteItemLongDescription(
     WriteDirectLine('</dl>');
   end;
 
-  procedure WriteReturnDesc(Func: TPasMethod; ReturnDesc: string);
+  procedure WriteReturnDesc(ReturnDesc: string);
   begin
     if ReturnDesc = '' then
       exit;
@@ -1300,18 +1299,19 @@ procedure TGenericHTMLDocGenerator.WriteItemLongDescription(
 var
   Ancestor: TBaseItem;
   AncestorName: string;
-  AItemMethod: TPasMethod;
   EnumMember: TPasItem;
   i: Integer;
 begin
   if not Assigned(AItem) then Exit;
 
-  if AItem.IsDeprecated then
+  if hdDeprecated in AItem.HintDirectives then
     WriteHintDirective(FLanguage.Translation[trDeprecated], AItem.DeprecatedNote);
-  if AItem.IsPlatformSpecific then
+  if hdPlatform in AItem.HintDirectives then
     WriteHintDirective(FLanguage.Translation[trPlatformSpecific]);
-  if AItem.IsLibrarySpecific then
+  if hdLibrary in AItem.HintDirectives then
     WriteHintDirective(FLanguage.Translation[trLibrarySpecific]);
+  if hdExperimental in AItem.HintDirectives then
+    WriteHintDirective(FLanguage.Translation[trExperimental]);
 
   if AItem.AbstractDescription <> '' then
   begin
@@ -1361,15 +1361,10 @@ begin
 
   WriteAttributes(AItem.Attributes);
 
+  WriteParamsOrRaises(AItem, trParameters, AItem.Params, false, 'parameters');
   if AItem is TPasMethod then
-  begin
-    AItemMethod := TPasMethod(AItem);
-    WriteParamsOrRaises(AItemMethod, trParameters,
-      AItemMethod.Params, false, 'parameters');
-    WriteReturnDesc(AItemMethod, AItemMethod.Returns);
-    WriteParamsOrRaises(AItemMethod, trExceptionsRaised,
-      AItemMethod.Raises, true, 'exceptions_raised');
-  end;
+    WriteReturnDesc(TPasMethod(AItem).Returns);
+  WriteParamsOrRaises(AItem, trExceptionsRaised, AItem.Raises, true, 'exceptions_raised');
 
   WriteSeeAlso(AItem.SeeAlso);
 
@@ -2317,12 +2312,12 @@ end;
 
 function TGenericHTMLDocGenerator.FormatBold(const Text: string): string;
 begin
-  Result := '<b>' + Text + '</b>';
+  Result := '<strong>' + Text + '</strong>';
 end;
 
 function TGenericHTMLDocGenerator.FormatItalic(const Text: string): string;
 begin
-  Result := '<i>' + Text + '</i>';
+  Result := '<em>' + Text + '</em>';
 end;
 
 function TGenericHTMLDocGenerator.FormatPreformatted(
@@ -2517,6 +2512,7 @@ function THTMLDocGenerator.MakeBodyBegin: string;
 
   var
     Overview: TCreatedOverviewFile;
+    i: Integer;
   begin
     Result := '';
 
@@ -2544,6 +2540,16 @@ function THTMLDocGenerator.MakeBodyBegin: string;
       Result := Result + LocalMakeLink(
         OverviewFilesInfo[ofGraphVizClasses].BaseFileName + '.' + LinkGraphVizClasses,
         OverviewFilesInfo[ofGraphVizClasses].TranslationId);
+
+    if (AdditionalFiles <> nil) and (AdditionalFiles.Count > 0) then
+    begin
+      for i := 0 to AdditionalFiles.Count - 1 do
+      begin
+        if AdditionalFiles.Get(i).ShortTitle = '' then
+          Result := Result + LocalMakeLink(AdditionalFiles.Get(i).OutputFileName, trAdditionalFile) else
+          Result := Result + LocalMakeLink(AdditionalFiles.Get(i).OutputFileName, AdditionalFiles.Get(i).ShortTitle);
+      end;
+    end;
 
     if Conclusion <> nil then
     begin

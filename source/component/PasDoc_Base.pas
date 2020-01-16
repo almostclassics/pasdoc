@@ -1,5 +1,5 @@
 {
-  Copyright 1998-2016 PasDoc developers.
+  Copyright 1998-2018 PasDoc developers.
 
   This file is part of "PasDoc".
 
@@ -88,6 +88,7 @@ type
     FUnits: TPasUnits;
     FVerbosity: Cardinal;
     FCommentMarkers: TStringList;
+    FIgnoreMarkers: TStringList;
     FGenerator: TDocGenerator;
     FShowVisibilities: TVisibilities;
     FMarkerOptional: boolean;
@@ -96,11 +97,15 @@ type
     FSortSettings: TSortSettings;
     FConclusionFileName: string;
     FIntroductionFileName: string;
+    FAdditionalFilesNames: TStringList;
     FConclusion: TExternalItem;
     FIntroduction: TExternalItem;
+    FAdditionalFiles: TExternalItemList;
     FImplicitVisibility: TImplicitVisibility;
     FHandleMacros: boolean;
     FAutoLink: boolean;
+    FAutoBackComments: boolean;
+    FInfoMergeType: TInfoMergeType;
     procedure SetDescriptionFileNames(const ADescriptionFileNames: TStringVector);
     procedure SetDirectives(const ADirectives: TStringVector);
     procedure SetIncludeDirectories(const AIncludeDirectores: TStringVector);
@@ -109,6 +114,7 @@ type
     procedure SetStarOnly(const Value: boolean);
     function GetStarOnly: boolean;
     procedure SetCommentMarkers(const Value: TStringList);
+    procedure SetIgnoreMarkers(const Value: TStringList);
 
     { Creates a @link(TPasUnit) object from the stream and adds it to
       @link(FUnits). }
@@ -165,6 +171,8 @@ type
     property Conclusion: TExternalItem read FConclusion;
     // After @link(Execute) has been called, @name holds the introduction.
     property Introduction: TExternalItem read FIntroduction;
+    // After @link(Execute) has been called, @name holds the additional external files.
+    property AdditionalFiles: TExternalItemList read FAdditionalFiles;
   published
     property DescriptionFileNames: TStringVector
       read FDescriptionFileNames write SetDescriptionFileNames;
@@ -187,6 +195,7 @@ type
       default DEFAULT_VERBOSITY_LEVEL;
     property StarOnly: boolean read GetStarOnly write SetStarOnly stored false;
     property CommentMarkers: TStringList read FCommentMarkers write SetCommentMarkers;
+    property IgnoreMarkers: TStringList read FIgnoreMarkers write SetIgnoreMarkers;
     property MarkerOptional: boolean read FMarkerOptional write FMarkerOptional
       default false;
     property IgnoreLeading: string read FIgnoreLeading write FIgnoreLeading;
@@ -206,6 +215,8 @@ type
     property ConclusionFileName: string read FConclusionFileName
       write FConclusionFileName;
 
+    property AdditionalFilesNames: TStringList read FAdditionalFilesNames;
+
     { See command-line option @--implicit-visibility documentation at
       [https://github.com/pasdoc/pasdoc/wiki/ImplicitVisibilityOption].
       This will be passed to parser instance. }
@@ -219,6 +230,10 @@ type
       [https://github.com/pasdoc/pasdoc/wiki/AutoLinkOption] }
     property AutoLink: boolean
       read FAutoLink write FAutoLink default false;
+    property AutoBackComments: boolean
+      read FAutoBackComments write FAutoBackComments default false;
+    property InfoMergeType: TInfoMergeType
+      read FInfoMergeType write FInfoMergeType;
   end;
 
 implementation
@@ -237,6 +252,7 @@ begin
   FDirectives := NewStringVector;
   FIncludeDirectories := NewStringVector;
   FSourceFileNames := NewStringVector;
+  FAdditionalFilesNames := TStringList.Create();
 
   { Set default property values }
   FGeneratorInfo := true;
@@ -246,6 +262,7 @@ begin
 
   FGenerator := nil;
   FCommentMarkers := TStringList.Create;
+  FIgnoreMarkers := TStringList.Create;
   FUnits := TPasUnits.Create(True);
 end;
 
@@ -254,13 +271,16 @@ end;
 destructor TPasDoc.Destroy;
 begin
   FCommentMarkers.Free;
+  FIgnoreMarkers.Free;
   FDescriptionFileNames.Free;
   FDirectives.Free;
   FIncludeDirectories.Free;
   FSourceFileNames.Free;
+  FAdditionalFilesNames.Free;
   FUnits.Free;
   FConclusion.Free;
   FIntroduction.Free;
+  FAdditionalFiles.Free;
   inherited;
 end;
 
@@ -323,8 +343,11 @@ begin
     p.ShowVisibilities := ShowVisibilities;
     p.ImplicitVisibility := ImplicitVisibility;
     p.CommentMarkers := CommentMarkers;
+    p.IgnoreMarkers := IgnoreMarkers;
     p.MarkersOptional := MarkerOptional;
     p.IgnoreLeading := IgnoreLeading;
+    p.AutoBackComments := AutoBackComments;
+    p.InfoMergeType := InfoMergeType;
 
     LLoaded := false;
 
@@ -434,6 +457,7 @@ var
   Count, i: Integer;
   p: string;
   InputStream: TStream;
+  additionalFile: TExternalItem;
 
   procedure ParseExternalFile(const FileName: string;
     var ExternalItem: TExternalItem);
@@ -486,6 +510,13 @@ begin
   ParseExternalFile(IntroductionFileName, FIntroduction);
   FreeAndNil(FConclusion);
   ParseExternalFile(ConclusionFileName, FConclusion);
+  FreeAndNil(FAdditionalFiles);
+  FAdditionalFiles := TExternalItemList.Create(true);
+  for i := 0 to FAdditionalFilesNames.Count - 1 do
+  begin
+    ParseExternalFile(AdditionalFilesNames[i], additionalFile);
+    FAdditionalFiles.Add(additionalFile)
+  end;
 
   DoMessage(2, pmtInformation, '... %d Source File(s) parsed', [Count]);
 end;
@@ -599,6 +630,7 @@ begin
   Generator.Units := FUnits;
   Generator.Introduction := FIntroduction;
   Generator.Conclusion := FConclusion;
+  Generator.AdditionalFiles := FAdditionalFiles;
   Generator.AutoLink := AutoLink;
   Generator.BuildLinks;
 
@@ -751,6 +783,11 @@ begin
   FCommentMarkers.Assign(Value);
 end;
 
+procedure TPasDoc.SetIgnoreMarkers(const Value: TStringList);
+begin
+  FIgnoreMarkers.Assign(Value);
+end;
+
 procedure TPasDoc.HandleExternalFile(const FileName: string;
   out ExternalItem: TExternalItem);
 begin
@@ -765,7 +802,7 @@ begin
       my_introduction.html -- without this check, pasdoc could
       overwrite this file too easily). }
     if SameText(ExtractFileExt(FileName), Generator.GetFileExtension) then
-      raise Exception.CreateFmt('Introduction/conclusion file extension' +
+      raise Exception.CreateFmt('External file extension' +
         ' is the same as file extension of generated documentation ("%s"), ' +
         'refusing to generate documentation', [Generator.GetFileExtension]);
 

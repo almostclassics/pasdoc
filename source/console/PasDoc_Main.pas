@@ -1,6 +1,10 @@
 { @abstract(Provides the Main procedure.) }
 unit PasDoc_Main;
 
+{ Define this to see the backtrace of crashes (when compiled with FPC).
+  Easier for debugging. }
+{ $define LET_EXCEPTIONS_THROUGH}
+
 interface
 
 { This is the main procedure of PasDoc, it does everything. }
@@ -11,7 +15,7 @@ implementation
 uses
   PasDoc_Base,
   PasDoc_Languages,
-  SysUtils,
+  SysUtils, StrUtils,
   PasDoc_Utils,
   PasDoc_GenHtml,
   PasDoc_GenSimpleXML,
@@ -63,6 +67,7 @@ type
     OptionLinkGVClasses: TStringOption;
     OptionVisibleMembers: TSetOption;
     OptionCommentMarker: TStringOptionList;
+    OptionIgnoreMarker: TStringOptionList;
     OptionMarkerOptional: TBoolOption;
     OptionIgnoreLeading: TStringOption;
     OptionCacheDir: TStringOption;
@@ -74,12 +79,16 @@ type
     OptionSort: TSetOption;
     OptionIntroduction: TStringOption;
     OptionConclusion: TStringOption;
+    OptionAdditionalFiles: TPathListOption;
     OptionLatexHead: TStringOption;
     OptionImplicitVisibility: TStringOption;
     OptionNoMacro: TBoolOption;
     OptionAutoLink: TBoolOption;
     OptionAutoLinkExclude: TStringOption;
     OptionExternalClassHierarchy: TStringOption;
+    OptionMarkdown: TBoolOption;
+    OptionAutoBackComments: TBoolOption;
+    OptionInfoMergeMode: TStringOption;
   public
     constructor Create; override;
     procedure InterpretCommandline(PasDoc: TPasDoc);
@@ -102,8 +111,21 @@ type
 constructor TPasdocOptions.Create;
 var
   l: TLanguageID;
+  mt: TInfoMergeType;
+const
+  InfoMergeTypeExpl: array[TInfoMergeType] of string =
+  (
+    '',
+    'Read both interface and implementation comments. Use whichever comment is non-empty. If they are both non-empty, use the interface comment.',
+    'Read both interface and implementation comments, and concatenate them. The concatenation process is smart: if the interface comment is also present (repeated) at the beginning of the implementation comment, then it will be ignored (to not repeat 2x the same text in the concatenated result)',
+    'Just like "prefer-interface", but if both comments are non-empty, use the implementation comment'
+  );
 begin
   inherited;
+
+  Self.IncludeFileOptionName := '@<path to config file>';
+  Self.IncludeFileOptionExpl := 'Read options from specified file and insert them at current position. File must contain one option per line.'+LineEnding+
+    'Format is "name[=value]", options are named just like in the command line but without leading dashes. Option values with spaces must NOT be quoted';
 
   OptionHelp := TBoolOption.Create('?', 'help');
   OptionHelp.Explanation := 'Show this help';
@@ -182,7 +204,7 @@ begin
   OptionExcludeGenerator := TBoolOption.Create('X', 'exclude-generator');
   OptionExcludeGenerator.Explanation := 'Exclude generator information';
   AddOption(OptionExcludeGenerator);
-  
+
   OptionIncludeCreationTime := TBoolOption.Create(#0, 'include-creation-time');
   OptionIncludeCreationTime.Explanation := 'Include creation time in the docs';
   AddOption(OptionIncludeCreationTime);
@@ -201,6 +223,10 @@ begin
   OptionCommentMarker := TStringOptionList.Create(#0, 'marker');
   OptionCommentMarker.Explanation := 'Parse only {<marker>, (*<marker> and //<marker> comments. Overrides the staronly option, which is a shortcut for ''--marker=**''';
   AddOption(OptionCommentMarker);
+
+  OptionIgnoreMarker := TStringOptionList.Create(#0, 'ignore-marker');
+  OptionIgnoreMarker.Explanation := 'Skip comments starting with <marker> (that is, {<marker>, (*<marker> and //<marker> comments)';
+  AddOption(OptionIgnoreMarker);
 
   OptionMarkerOptional := TBoolOption.Create(#0, 'marker-optional');
   OptionMarkerOptional.Explanation := 'Do not require the markers given in --marker but remove them from the comment if they exist.';
@@ -298,6 +324,10 @@ begin
   OptionConclusion.Value := '';
   AddOption(OptionConclusion);
 
+  OptionAdditionalFiles := TPathListOption.Create('A', 'additional');
+  OptionAdditionalFiles.Explanation := 'The name of a text file with addition materials for the project';
+  AddOption(OptionAdditionalFiles);
+
   OptionLatexHead := TStringOption.Create(#0, 'latex-head');
   OptionLatexHead.Explanation := 'The name of a text file that includes lines to be inserted into the preamble of a LaTeX file';
   OptionLatexHead.Value := '';
@@ -307,22 +337,37 @@ begin
   OptionImplicitVisibility.Explanation := 'How pasdoc should handle class members within default class visibility';
   OptionImplicitVisibility.Value := 'public';
   AddOption(OptionImplicitVisibility);
-  
+
   OptionNoMacro := TBoolOption.Create(#0, 'no-macro');
   OptionNoMacro.Explanation := 'Turn FPC macro support off';
   AddOption(OptionNoMacro);
-  
+
   OptionAutoLink := TBoolOption.Create(#0, 'auto-link');
   OptionAutoLink.Explanation := 'Automatically create links, without the need to explicitly use @link tags';
   AddOption(OptionAutoLink);
-  
+
+  OptionAutoBackComments := TBoolOption.Create(#0, 'auto-back-comments');
+  OptionAutoBackComments.Explanation := 'Consider //-style comments after an identifier in the same line as description of that identifier.';
+  AddOption(OptionAutoBackComments);
+
   OptionAutoLinkExclude := TStringOption.Create(#0, 'auto-link-exclude');
   OptionAutoLinkExclude.Explanation := 'Even when --auto-link is on, never automatically create links to identifiers in the specified file. The file should contain one identifier on every line';
   AddOption(OptionAutoLinkExclude);
-  
+
   OptionExternalClassHierarchy := TStringOption.Create(#0, 'external-class-hierarchy');
   OptionExternalClassHierarchy.Explanation := 'File defining hierarchy of classes not included in your source code, for more complete class tree diagrams';
   AddOption(OptionExternalClassHierarchy);
+
+  OptionMarkdown := TBoolOption.Create(#0, 'markdown');
+  OptionMarkdown.Explanation := 'Decode Markdown syntax';
+  AddOption(OptionMarkdown);
+
+  OptionInfoMergeMode := TStringOption.Create(#0, 'implementation-comments');
+  OptionInfoMergeMode.Explanation := 'Read implementation section of units and merge info to that taken from interface section. Option value determines how info is merged:'+LineEnding;
+  for mt := Succ(Low(TInfoMergeType)) to High(TInfoMergeType) do
+    OptionInfoMergeMode.Explanation := OptionInfoMergeMode.Explanation +
+      '  ' + InfoMergeTypeStr[mt] + ' - ' + InfoMergeTypeExpl[mt] + LineEnding;
+  AddOption(OptionInfoMergeMode);
 end;
 
 procedure TPasdocMain.PrintHeader;
@@ -336,7 +381,7 @@ begin
 end;
 
 procedure TPasdocMain.PrintUsage(OptionParser: TOptionParser);
-begin                      
+begin
   PrintHeader;
   WriteLn('Usage: ' + ExtractFileName(ParamStr(0)) + ' [options] [files]');
   WriteLn('Valid options are: ');
@@ -399,7 +444,7 @@ procedure TPasdocOptions.InterpretCommandline(PasDoc: TPasDoc);
       on E: Exception do
       begin
         E.Message :=
-          'Error when opening file for "--latex-head" option: ' + E.Message;
+          'Error when opening file for "--'+OptionLatexHead.LongForm+'" option: ' + E.Message;
         raise;
       end;
     end;
@@ -480,19 +525,22 @@ begin
   if OptionUseTipueSearch.TurnedOn then begin
     if not (PasDoc.Generator is TGenericHTMLDocGenerator) then begin
       raise EInvalidCommandLine.Create(
-        'You can''t specify --use-tipue-search option for non-html output formats');
+        'You can''t specify "--'+OptionUseTipueSearch.LongForm+'" option for non-html output formats');
     end;
   end;
 
   if OptionHtmlHelpContents.Value <> '' then begin
     if not (PasDoc.Generator is THTMLHelpDocGenerator) then begin
-      raise EInvalidCommandLine.Create('You can specify --html-help-contents' +
+      raise EInvalidCommandLine.Create('You can specify "--'+OptionHtmlHelpContents.LongForm+'"' +
         ' option only for HTMLHelp output format');
     end;
   end;
 
   if OptionCommentMarker.WasSpecified then begin
     PasDoc.CommentMarkers.Assign(OptionCommentMarker.Values);
+  end;
+  if OptionIgnoreMarker.WasSpecified then begin
+    PasDoc.IgnoreMarkers.Assign(OptionIgnoreMarker.Values);
   end;
   if OptionStarOnly.TurnedOn then
     PasDoc.StarOnly := true;
@@ -516,7 +564,7 @@ begin
     PasDoc.Generator.ParseAbbreviationsFile(OptionAbbrevFiles.Values[i]);
   end;
 
-  PasDoc.Generator.CheckSpelling := 
+  PasDoc.Generator.CheckSpelling :=
     OptionASPELL.WasSpecified or OptionSpellCheck.WasSpecified;
   if OptionSpellCheck.WasSpecified then
     PasDoc.Generator.AspellLanguage := LanguageCode(PasDoc.Generator.Language) else
@@ -538,7 +586,7 @@ begin
   if SameText(OptionLinkLook.Value, 'stripped') then
     PasDoc.Generator.LinkLook := llStripped else
     raise EInvalidCommandLine.CreateFmt(
-      'Invalid argument for "--link-look" option : "%s"',
+      'Invalid argument for "--'+OptionLinkLook.LongForm+'" option : "%s"',
       [OptionLinkLook.Value]);
 
   if OptionFullLink.TurnedOn then
@@ -552,14 +600,15 @@ begin
 
   PasDoc.IntroductionFileName := OptionIntroduction.Value;
   PasDoc.ConclusionFileName := OptionConclusion.Value;
+  PasDoc.AdditionalFilesNames.Assign(OptionAdditionalFiles.Values);
 
   if OptionLatexHead.Value <> '' then begin
     if not (PasDoc.Generator is TTexDocGenerator) then begin
       raise EInvalidCommandLine.Create(
-        'You can only use the "latex-head" option with LaTeX output.');
+        'You can only use the "--'+OptionLatexHead.LongForm+'" option with LaTeX output.');
     end;
   end;
-  
+
   if SameText(OptionImplicitVisibility.Value, 'public') then
     PasDoc.ImplicitVisibility := ivPublic else
   if SameText(OptionImplicitVisibility.Value, 'published') then
@@ -567,12 +616,12 @@ begin
   if SameText(OptionImplicitVisibility.Value, 'implicit') then
     PasDoc.ImplicitVisibility := ivImplicit else
     raise EInvalidCommandLine.CreateFmt(
-      'Invalid argument for "--implicit-visibility" option : "%s"',
+      'Invalid argument for "--'+OptionImplicitVisibility.LongForm+'" option : "%s"',
       [OptionImplicitVisibility.Value]);
-      
+
   PasDoc.HandleMacros := not OptionNoMacro.TurnedOn;
   PasDoc.AutoLink := OptionAutoLink.TurnedOn;
-  
+
   if OptionAutoLinkExclude.Value <> '' then
   begin
     PasDoc.Generator.AutoLinkExclude.LoadFromFile(OptionAutoLinkExclude.Value);
@@ -582,10 +631,17 @@ begin
       large file like /usr/share/dict/american-english for this option. }
     PasDoc.Generator.AutoLinkExclude.Sorted := true;
   end;
-  
+
   if OptionExternalClassHierarchy.WasSpecified then
     PasDoc.Generator.ExternalClassHierarchy.LoadFromFile(
       OptionExternalClassHierarchy.Value);
+
+  PasDoc.Generator.Markdown := OptionMarkdown.TurnedOn;
+  PasDoc.AutoBackComments := OptionAutoBackComments.TurnedOn;
+
+  i := IndexText(OptionInfoMergeMode.Value, InfoMergeTypeStr);
+  if i > Ord(imtNone) then
+    PasDoc.InfoMergeType := TInfoMergeType(i);
 end;
 
 { ---------------------------------------------------------------------------- }
@@ -619,19 +675,13 @@ begin
 
     if not OptionParser.OptionExcludeGenerator.TurnedOn then PrintHeader;
 
+    PasDoc := TPasDoc.Create(nil);
     try
-      PasDoc := TPasDoc.Create(nil);
-      try
-        PasDoc.OnMessage := {$ifdef FPC}@{$endif} WriteWarning;
-        OptionParser.InterpretCommandline(PasDoc);
-        PasDoc.Execute;
-      finally
-        PasDoc.Free;
-      end;
-    except
-      on e: Exception do
-        with e do
-          WriteLn('Fatal Error: ', Message);
+      PasDoc.OnMessage := {$ifdef FPC}@{$endif} WriteWarning;
+      OptionParser.InterpretCommandline(PasDoc);
+      PasDoc.Execute;
+    finally
+      PasDoc.Free;
     end;
   finally
     OptionParser.Free;
@@ -649,17 +699,27 @@ begin
     {$IFEND}
   {$ENDIF}
 {$ENDIF}
+  {$ifndef LET_EXCEPTIONS_THROUGH}
   try
+  {$endif not LET_EXCEPTIONS_THROUGH}
     PasdocMain := TPasdocMain.Create;
     try
       PasdocMain.Execute;
+      if ExitCode <> 0 then
+        WriteLn('The documentation was generated, but some problems during parsing or generation occurred. (Consult the output above for details.) Therefore exiting with non-zero exit status.');
     finally
       PasdocMain.Free;
     end;
+  {$ifndef LET_EXCEPTIONS_THROUGH}
   except
     on E: Exception do
-      WriteLn(E.ClassName + ' :' + E.Message);
+    begin
+      WriteLn('Fatal Error: ' + E.ClassName + ': ' + E.Message);
+      ExitCode := 1; // exit with non-zero status
+      Exit;
+    end;
   end;
+  {$endif not LET_EXCEPTIONS_THROUGH}
 {$IFNDEF FPC}
   {$IFDEF CONDITIONALEXPRESSIONS}
     {$IF CompilerVersion > 14}
